@@ -21,3 +21,10 @@ func OneOr[T any](result1 T, result2 T) T {
 	}
 	return result1
 }
+
+func ErrorOr(err error, val string) string {
+	if err != nil {
+		return err.Error()
+	}
+	return val
+}
