@@ -52,7 +52,7 @@ func AllTrue(bs ...bool) bool {
 }
 
 // InList InList["a",[]string{"a","b"}] == true
-func InList[T comparable](item T, list []T) bool {
+func InList[T comparable](item T, list ...T) bool {
 	for _, t := range list {
 		if t == item {
 			return true
