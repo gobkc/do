@@ -28,3 +28,35 @@ func ErrorOr(err error, val string) string {
 	}
 	return val
 }
+
+// AnyTrue AnyTrue(true,false,false) == true
+// AnyTrue AnyTrue(false,false,false) == false
+func AnyTrue(bs ...bool) bool {
+	for _, b := range bs {
+		if b == true {
+			return true
+		}
+	}
+	return false
+}
+
+// AllTrue AllTrue(true,true,true) == true
+// AllTrue AllTrue(true,false,true) == false
+func AllTrue(bs ...bool) bool {
+	for _, b := range bs {
+		if b == false {
+			return false
+		}
+	}
+	return true
+}
+
+// InList InList["a",[]string{"a","b"}] == true
+func InList[T comparable](item T, list []T) bool {
+	for _, t := range list {
+		if t == item {
+			return true
+		}
+	}
+	return false
+}
