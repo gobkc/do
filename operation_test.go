@@ -1,6 +1,9 @@
 package do
 
 import (
+	"errors"
+	"log/slog"
+	"math/rand"
 	"testing"
 )
 
@@ -13,4 +16,40 @@ func TestOneOr(t *testing.T) {
 	if v2 != `bbb` {
 		t.Errorf(`value error`)
 	}
+}
+
+func GenError() error {
+	r := rand.Int31n(5)
+	if r == 1 || r == 2 || r == 3 || r == 4 {
+		return errors.New(`random error`)
+	}
+	return nil
+}
+
+type Test struct {
+	Name string
+}
+
+func TestReTry_Retry(t *testing.T) {
+	retry := ReTry[Test]{}
+	s := retry.Keep(func(t *Test) error {
+		if err := GenError(); err != nil {
+			return err
+		}
+		t.Name = `abc`
+		return nil
+	})
+	slog.Default().Info(`test success`, slog.String(`value`, s.Name))
+}
+
+func TestReTry_Times(t *testing.T) {
+	retry := ReTry[Test]{}
+	s := retry.Times(2, func(t *Test) error {
+		if err := GenError(); err != nil {
+			return err
+		}
+		t.Name = `abc`
+		return nil
+	})
+	slog.Default().Info(`test success`, slog.String(`value`, s.Name))
 }

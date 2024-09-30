@@ -1,7 +1,10 @@
 package do
 
 import (
+	"log/slog"
 	"reflect"
+	"sync"
+	"time"
 )
 
 func OneOf[T any](condition bool, result1 T, result2 T) T {
@@ -59,4 +62,59 @@ func InList[T comparable](item T, list ...T) bool {
 		}
 	}
 	return false
+}
+
+type ReTry[T any] struct {
+	sync.Once
+	value *T
+}
+
+// Keep example
+//
+//	s := retry.Keep(func(t *Test) error {
+//		if err := GenError(); err != nil {
+//			return err
+//		}
+//		t.Name = `abc`
+//		return nil
+//	})
+func (r *ReTry[T]) Keep(action func(t *T) error) *T {
+	r.Do(func() {
+		r.value = new(T)
+		name := GetStructName(r.value)
+		for {
+			if err := action(r.value); err != nil {
+				slog.Default().Error(`Failed to initialize `+name, slog.String(`error`, err.Error()))
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			break
+		}
+	})
+	return r.value
+}
+
+func (r *ReTry[T]) Times(times int, action func(t *T) error) *T {
+	r.Do(func() {
+		r.value = new(T)
+		name := GetStructName(r.value)
+		for i := 0; i < times; i++ {
+			if err := action(r.value); err != nil {
+				slog.Default().Error(`Failed to initialize `+name, slog.String(`error`, err.Error()))
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			break
+		}
+	})
+	return r.value
+}
+
+func GetStructName(d any) string {
+	de := reflect.ValueOf(d)
+	if de.Kind() == reflect.Pointer {
+		de = de.Elem()
+	}
+	n := de.Type().Name()
+	return n
 }
