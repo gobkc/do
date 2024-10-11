@@ -118,3 +118,101 @@ func GetStructName(d any) string {
 	n := de.Type().Name()
 	return n
 }
+
+type PollerImpl[T comparable] struct {
+	interval *time.Duration
+	err      chan error
+	result   chan *T
+	done     chan struct{}
+	stopped  bool
+}
+
+type PollerSetting struct {
+	Interval time.Duration
+}
+
+func (p *PollerImpl[T]) Setting(f func(settings *PollerSetting)) *PollerImpl[T] {
+	settings := &PollerSetting{
+		Interval: 1 * time.Second,
+	}
+	f(settings)
+	if p.interval != nil {
+		*p.interval = settings.Interval
+	}
+	return p
+}
+
+func (p *PollerImpl[T]) Then(f func(result *T)) *PollerImpl[T] {
+	go func() {
+		for {
+			select {
+			case result := <-p.result:
+				f(result)
+			case <-p.done:
+				slog.Default().Info(`Stopping Then loop`)
+				return
+			}
+		}
+	}()
+	return p
+}
+
+func (p *PollerImpl[T]) Catch(f func(err error)) {
+	go func() {
+		for {
+			select {
+			case err := <-p.err:
+				f(err)
+			case <-p.done:
+				slog.Default().Info(`Stopping Catch loop`)
+				return
+			}
+		}
+	}()
+}
+
+func (p *PollerImpl[T]) Stop() {
+	// close all channel and send some completion signal
+	close(p.done)
+	close(p.err)
+	close(p.result)
+	p.stopped = true
+}
+
+func Poller[QueryResult comparable](query func(q *QueryResult) error) *PollerImpl[QueryResult] {
+	q := new(QueryResult)
+	interval := 1 * time.Second
+	poller := &PollerImpl[QueryResult]{
+		interval: &interval,
+		err:      make(chan error),
+		result:   make(chan *QueryResult),
+		done:     make(chan struct{}),
+		stopped:  false,
+	}
+
+	go func() {
+		for {
+			select {
+			case <-poller.done: // close poller
+				slog.Default().Info(`Stopping Poller loop`)
+				return
+			default:
+				time.Sleep(*poller.interval)
+				if poller.stopped {
+					slog.Default().Info(`Stopping Poller loop`)
+					return
+				}
+				err := query(q)
+				//send queryResult to the then function & error to the catch function
+				if err != nil {
+					poller.err <- err
+					continue
+				}
+				if q != nil {
+					poller.result <- q
+				}
+			}
+		}
+	}()
+	return poller
+}

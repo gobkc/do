@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"testing"
+	"time"
 )
 
 func TestOneOr(t *testing.T) {
@@ -52,4 +53,40 @@ func TestReTry_Times(t *testing.T) {
 		return nil
 	})
 	slog.Default().Info(`test success`, slog.String(`value`, s.Name))
+}
+
+type TestPollerMockData struct {
+	User string
+	Id   int64
+}
+
+func TestPoller(t *testing.T) {
+	poller := Poller(func(q *TestPollerMockData) error {
+		//Here is a simulation of polling to read the database, which may read data or return an error
+		randInt := rand.Int31n(3)
+		if randInt == 0 {
+			q.User = `user 1`
+			q.Id = 1
+		}
+		if randInt == 1 {
+			q.User = `user 2`
+			q.Id = 2
+		}
+		if randInt >= 2 {
+			return errors.New(`invalid id`)
+		}
+		return nil
+	})
+	//poller.Setting(func(settings *PollerSetting) {
+	//	settings.Interval = 2 * time.Second
+	//})
+	poller.Then(func(result *TestPollerMockData) {
+		slog.Default().Info(`read success`, slog.Int64(`user id`, result.Id), slog.String(`user name`, result.User))
+	}).Catch(func(err error) {
+		slog.Default().Error(`some error info`, slog.String(`error`, err.Error()))
+	})
+
+	time.Sleep(11 * time.Second)
+	poller.Stop()
+	time.Sleep(2 * time.Second)
 }
