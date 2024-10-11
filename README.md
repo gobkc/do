@@ -10,6 +10,20 @@ You can commit PR to this repository
 go get -u github.com/gobkc/do
 ````
 
+### Unit test?
+
+1. how to test all unit test cases?
+
+````
+go test -v
+````
+
+2. how to test a specific unit test case?
+
+````
+go test -v -run Poller
+````
+
 ### Quick start
 ````
 package main
