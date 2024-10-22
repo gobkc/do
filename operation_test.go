@@ -77,16 +77,16 @@ func TestPoller(t *testing.T) {
 		}
 		return nil
 	})
-	//poller.Setting(func(settings *PollerSetting) {
-	//	settings.Interval = 2 * time.Second
-	//})
+	poller.Setting(func(settings *PollerSetting) {
+		settings.Interval = 1 * time.Second
+	})
 	poller.Then(func(result *TestPollerMockData) {
 		slog.Default().Info(`read success`, slog.Int64(`user id`, result.Id), slog.String(`user name`, result.User))
 	}).Catch(func(err error) {
 		slog.Default().Error(`some error info`, slog.String(`error`, err.Error()))
 	})
 
-	time.Sleep(11 * time.Second)
+	time.Sleep(22 * time.Second)
 	poller.Stop()
 	time.Sleep(2 * time.Second)
 }

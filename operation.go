@@ -197,7 +197,6 @@ func Poller[QueryResult comparable](query func(q *QueryResult) error) *PollerImp
 				slog.Default().Info(`Stopping Poller loop`)
 				return
 			default:
-				time.Sleep(*poller.interval)
 				if poller.stopped {
 					slog.Default().Info(`Stopping Poller loop`)
 					return
@@ -206,11 +205,15 @@ func Poller[QueryResult comparable](query func(q *QueryResult) error) *PollerImp
 				//send queryResult to the then function & error to the catch function
 				if err != nil {
 					poller.err <- err
+					slog.Default().Error(`The current polling failed`, slog.String(`next execution time:`, time.Now().Add(*poller.interval).Format(time.DateTime)))
+					time.Sleep(*poller.interval)
 					continue
 				}
 				if q != nil {
 					poller.result <- q
 				}
+				slog.Default().Info(`The current polling succeeded`, slog.String(`next execution time:`, time.Now().Add(*poller.interval).Format(time.DateTime)))
+				time.Sleep(*poller.interval)
 			}
 		}
 	}()
