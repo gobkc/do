@@ -119,7 +119,7 @@ func GetStructName(d any) string {
 	return n
 }
 
-type PollerImpl[T comparable] struct {
+type PollerImpl[T any] struct {
 	interval *time.Duration
 	err      chan error
 	result   chan *T
@@ -179,7 +179,7 @@ func (p *PollerImpl[T]) Stop() {
 	p.stopped = true
 }
 
-func Poller[QueryResult comparable](query func(q *QueryResult) error) *PollerImpl[QueryResult] {
+func Poller[QueryResult any](query func(q *QueryResult) error) *PollerImpl[QueryResult] {
 	q := new(QueryResult)
 	interval := 1 * time.Second
 	poller := &PollerImpl[QueryResult]{
