@@ -253,3 +253,38 @@ func Diff[T comparable](olds, news []T) (resp DiffResp[T]) {
 
 	return resp
 }
+
+// GetFieldList is a generic function that takes a slice of items and a fieldGetter function,
+// and returns a slice of any field type, such as string, int64, etc.
+// examples
+//
+//	names1 := GetFieldList(items1, func(item Item) string {
+//		return item.Name
+//	})
+//
+//	// Retrieve the Age field list from items1 (int64 type)
+func GetFieldList[T any, R any](items []T, fieldGetter func(T) R) []R {
+	var result []R
+	for _, item := range items {
+		result = append(result, fieldGetter(item))
+	}
+	return result
+}
+
+func GetFieldMaps[T any, K comparable](items []T, fieldGetter func(T) K) map[K][]T {
+	result := make(map[K][]T)
+	for _, item := range items {
+		key := fieldGetter(item)
+		result[key] = append(result[key], item)
+	}
+	return result
+}
+
+func GetFieldMap[T any, K comparable](items []T, fieldGetter func(T) K) map[K]T {
+	result := make(map[K]T)
+	for _, item := range items {
+		key := fieldGetter(item)
+		result[key] = item
+	}
+	return result
+}
