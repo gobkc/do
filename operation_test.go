@@ -2,6 +2,8 @@ package do
 
 import (
 	"errors"
+	"fmt"
+	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"math/rand"
 	"testing"
@@ -89,4 +91,24 @@ func TestPoller(t *testing.T) {
 	time.Sleep(22 * time.Second)
 	poller.Stop()
 	time.Sleep(2 * time.Second)
+}
+
+func TestNewLeaderPoller(t *testing.T) {
+	opt, err := redis.ParseURL(`redis://:@localhost:6379/1?dial_timeout=30s`)
+	if err != nil {
+		panic(err)
+	}
+	redisClient := redis.NewClient(opt)
+	pl := NewLeaderPoller[int64](func(setting *LeaderPollerSetting) {
+		setting.Interval = 2 * time.Second
+		setting.Client = redisClient
+		setting.Subject = `id test`
+	})
+	pl.Conditions(func() (int64, error) {
+		randInt := int64(rand.Int31n(3))
+		return randInt, nil
+	})
+	pl.Run(func(id int64) {
+		fmt.Println(id)
+	})
 }

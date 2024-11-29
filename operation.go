@@ -1,6 +1,9 @@
 package do
 
 import (
+	"context"
+	"fmt"
+	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"reflect"
 	"sync"
@@ -223,6 +226,98 @@ func Poller[QueryResult any](query func(q *QueryResult) error) *PollerImpl[Query
 type DiffResp[T comparable] struct {
 	Added   []T
 	Deleted []T
+}
+type LeaderPoller[T any] struct {
+	interval    time.Duration
+	redisClient *redis.Client
+	subject     string
+	key         string
+	conditions  []func() (T, error)
+}
+
+type LeaderPollerSetting struct {
+	Client   *redis.Client
+	Interval time.Duration
+	Subject  string
+	Key      string
+}
+
+func NewLeaderPoller[T any](fs func(setting *LeaderPollerSetting)) *LeaderPoller[T] {
+	setting := &LeaderPollerSetting{
+		Interval: 10 * time.Second,
+		Subject:  "NewLeaderPoller",
+	}
+	fs(setting)
+	if setting.Client == nil {
+		panic(`NewLeaderPoller failed: redis client is nil`)
+	}
+	now := time.Now().Unix()
+	key := fmt.Sprintf(`%v`, now)
+	setting.Client.Set(context.Background(), setting.Subject, key, 0)
+	leader := &LeaderPoller[T]{
+		interval:    setting.Interval,
+		redisClient: setting.Client,
+		subject:     setting.Subject,
+		key:         key,
+		conditions:  []func() (T, error){},
+	}
+	leader.intervalResetKey()
+	return leader
+}
+
+func (lp *LeaderPoller[T]) intervalResetKey() {
+	go func() {
+		for {
+			now := time.Now().Unix()
+			key := fmt.Sprintf(`%v`, now)
+			lp.redisClient.Set(context.Background(), lp.subject, key, 0)
+			lp.key = key
+			time.Sleep(10 * time.Minute)
+		}
+	}()
+
+}
+
+func (lp *LeaderPoller[T]) Conditions(conditionFunctions ...func() (T, error)) {
+	lp.conditions = append(lp.conditions, conditionFunctions...)
+}
+
+func (lp *LeaderPoller[T]) Run(task func(T)) {
+	for {
+		key, err := lp.redisClient.Get(context.Background(), lp.subject).Result()
+		if err != nil || key != lp.key {
+			slog.Warn(`the lock has been used`, slog.String(`subject`, lp.subject), slog.String(`current key`, lp.key), slog.String(`using key`, key))
+			time.Sleep(lp.interval)
+			continue
+		}
+		// Check conditions
+		pollerContext, err := lp.checkConditions()
+		if err != nil {
+			slog.Error(`conditions not met,retrying...`, slog.String(`error`, err.Error()))
+			time.Sleep(lp.interval)
+			continue
+		}
+
+		// If conditions are met, execute the task
+		slog.Info(`conditions met,running tasks...`)
+		task(pollerContext)
+
+		// Sleep for the polling interval
+		time.Sleep(lp.interval)
+	}
+}
+
+func (lp *LeaderPoller[T]) checkConditions() (t T, err error) {
+	t = *new(T)
+	for _, condition := range lp.conditions {
+		t, err = condition()
+		if err != nil {
+			t = *new(T)
+			return t, err
+		}
+	}
+
+	return t, nil
 }
 
 // Diff The diff function is used to analyze the items to be added and deleted between two slices.
