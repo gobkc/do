@@ -232,6 +232,7 @@ type LeaderPoller[T any] struct {
 	redisClient *redis.Client
 	subject     string
 	key         string
+	delayed     bool
 	conditions  []func() (T, error)
 }
 
@@ -240,6 +241,7 @@ type LeaderPollerSetting struct {
 	Interval time.Duration
 	Subject  string
 	Key      string
+	Delayed  bool
 }
 
 func NewLeaderPoller[T any](fs func(setting *LeaderPollerSetting)) *LeaderPoller[T] {
@@ -259,6 +261,7 @@ func NewLeaderPoller[T any](fs func(setting *LeaderPollerSetting)) *LeaderPoller
 		redisClient: setting.Client,
 		subject:     setting.Subject,
 		key:         key,
+		delayed:     setting.Delayed,
 		conditions:  []func() (T, error){},
 	}
 	leader.intervalResetKey()
@@ -284,6 +287,9 @@ func (lp *LeaderPoller[T]) Conditions(conditionFunctions ...func() (T, error)) {
 
 func (lp *LeaderPoller[T]) Run(task func(T)) {
 	for {
+		if !lp.delayed {
+			time.Sleep(lp.interval)
+		}
 		key, err := lp.redisClient.Get(context.Background(), lp.subject).Result()
 		if err != nil || key != lp.key {
 			slog.Warn(`the lock has been used`, slog.String(`subject`, lp.subject), slog.String(`current key`, lp.key), slog.String(`using key`, key))
@@ -303,7 +309,9 @@ func (lp *LeaderPoller[T]) Run(task func(T)) {
 		task(pollerContext)
 
 		// Sleep for the polling interval
-		time.Sleep(lp.interval)
+		if lp.delayed {
+			time.Sleep(lp.interval)
+		}
 	}
 }
 
