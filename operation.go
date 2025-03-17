@@ -1,12 +1,14 @@
 package do
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"reflect"
 	"sync"
+	"text/template"
 	"time"
 )
 
@@ -65,6 +67,10 @@ func InList[T comparable](item T, list ...T) bool {
 		}
 	}
 	return false
+}
+
+func AnyInList[T comparable]() {
+
 }
 
 type ReTry[T any] struct {
@@ -390,4 +396,22 @@ func GetFieldMap[T any, K comparable](items []T, fieldGetter func(T) K) map[K]T 
 		result[key] = item
 	}
 	return result
+}
+
+func ReplaceMap(s string, replace map[string]string) (result string, err error) {
+	result = s
+	if replace == nil {
+		replace = make(map[string]string)
+	}
+	tmpl, err := template.New("soapRequest").Parse(s)
+	if err != nil {
+		return result, err
+	}
+	var buf bytes.Buffer
+	err = tmpl.Execute(&buf, replace)
+	if err != nil {
+		return result, err
+	}
+	result = buf.String()
+	return result, nil
 }
