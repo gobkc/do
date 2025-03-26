@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"reflect"
 	"regexp"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -429,4 +430,20 @@ func RegexpCheck(pattern string, str string) bool {
 		return true
 	}
 	return false
+}
+
+// RegexpConvertSnake convert string to snake case
+// Example: RegexpConvertSnake(`AbC`) == `ab_c`
+func RegexpConvertSnake(s string) string {
+	re, err := regexp.Compile(`[A-Z]`)
+	if err != nil {
+		slog.Error("Error compiling snake case to snake case: %v", slog.String(`err`, err.Error()))
+		return s
+	}
+	return re.ReplaceAllStringFunc(s, func(match string) string {
+		if len(s) > 0 && s[0] == match[0] {
+			return strings.ToLower(match)
+		}
+		return "_" + strings.ToLower(match)
+	})
 }
