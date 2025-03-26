@@ -7,6 +7,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"reflect"
+	"regexp"
 	"sync"
 	"text/template"
 	"time"
@@ -414,4 +415,18 @@ func ReplaceMap(s string, replace map[string]string) (result string, err error) 
 	}
 	result = buf.String()
 	return result, nil
+}
+
+// RegexpCheck Use regular expressions to determine if a string matches
+// Example: RegexpCheck(`(?i)^[a-zA-Z]+ (asc|desc)$`,`dafd Asc`) == true
+func RegexpCheck(pattern string, str string) bool {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		slog.Error(`failed to compile regular expression.`, slog.String(`err`, err.Error()))
+		return false
+	}
+	if re.MatchString(str) {
+		return true
+	}
+	return false
 }
