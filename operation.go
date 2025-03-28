@@ -231,10 +231,6 @@ func Poller[QueryResult any](query func(q *QueryResult) error) *PollerImpl[Query
 	return poller
 }
 
-type DiffResp[T comparable] struct {
-	Added   []T
-	Deleted []T
-}
 type LeaderPoller[T any] struct {
 	interval    time.Duration
 	redisClient *redis.Client
@@ -336,11 +332,17 @@ func (lp *LeaderPoller[T]) checkConditions() (t T, err error) {
 	return t, nil
 }
 
+type DiffResp[T comparable] struct {
+	Added   []T
+	Deleted []T
+	Same    []T
+}
+
 // Diff The diff function is used to analyze the items to be added and deleted between two slices.
 // example:	var news = []string{`aa1`, `aa2`, `aa3`}
 // var olds = []string{`aa1`, `aa4`}
 // diffs := Diff(olds, news)
-// result:added: aa2,aa3,  deleted:aa4
+// result:added: aa2,aa3,  deleted:aa4, same: aa1
 func Diff[T comparable](olds, news []T) (resp DiffResp[T]) {
 	oldMap := make(map[T]struct{})
 	newMap := make(map[T]struct{})
@@ -353,6 +355,8 @@ func Diff[T comparable](olds, news []T) (resp DiffResp[T]) {
 		newMap[item] = struct{}{}
 		if _, ok := oldMap[item]; !ok {
 			resp.Added = append(resp.Added, item)
+		} else {
+			resp.Same = append(resp.Same, item)
 		}
 	}
 
