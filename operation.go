@@ -405,24 +405,28 @@ func GetFieldMap[T any, K comparable](items []T, fieldGetter func(T) K) map[K]T 
 	return result
 }
 
+var marshalFunc = func(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+var escapeFunc = func(v any) string {
+	switch val := v.(type) {
+	case string:
+		return template.HTMLEscapeString(val)
+	default:
+		return ``
+	}
+}
+
 func ReplaceMap(s string, replace map[string]string) (result string, err error) {
 	result = s
 	if replace == nil {
 		replace = make(map[string]string)
 	}
 	tmpl, err := template.New("soapRequest").Funcs(template.FuncMap{
-		"marshal": func(v interface{}) string {
-			b, _ := json.Marshal(v)
-			return string(b)
-		},
-		"escape": func(v any) string {
-			switch val := v.(type) {
-			case string:
-				return template.HTMLEscapeString(val)
-			default:
-				return ""
-			}
-		},
+		"marshal": marshalFunc,
+		"escape":  escapeFunc,
 	}).Parse(s)
 	if err != nil {
 		return result, err
