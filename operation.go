@@ -415,8 +415,13 @@ func ReplaceMap(s string, replace map[string]string) (result string, err error) 
 			b, _ := json.Marshal(v)
 			return string(b)
 		},
-		"escape": func(s string) string {
-			return template.HTMLEscapeString(s)
+		"escape": func(v any) string {
+			switch val := v.(type) {
+			case string:
+				return template.HTMLEscapeString(val)
+			default:
+				return ""
+			}
 		},
 	}).Parse(s)
 	if err != nil {
