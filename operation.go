@@ -3,6 +3,7 @@ package do
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/redis/go-redis/v9"
 	"log/slog"
@@ -409,7 +410,15 @@ func ReplaceMap(s string, replace map[string]string) (result string, err error) 
 	if replace == nil {
 		replace = make(map[string]string)
 	}
-	tmpl, err := template.New("soapRequest").Parse(s)
+	tmpl, err := template.New("soapRequest").Funcs(template.FuncMap{
+		"marshal": func(v interface{}) string {
+			b, _ := json.Marshal(v)
+			return string(b)
+		},
+		"escape": func(s string) string {
+			return template.HTMLEscapeString(s)
+		},
+	}).Parse(s)
 	if err != nil {
 		return result, err
 	}
