@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/redis/go-redis/v9"
 	"log/slog"
 	"reflect"
 	"regexp"
@@ -13,6 +12,8 @@ import (
 	"sync"
 	"text/template"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func OneOf[T any](condition bool, result1 T, result2 T) T {
@@ -468,4 +469,20 @@ func RegexpConvertSnake(s string) string {
 		}
 		return "_" + strings.ToLower(match)
 	})
+}
+
+// Unique
+// data := []int{1, 2, 2, 3, 1, 4, 5, 3}
+// unique := Unique(data)
+// fmt.Println(unique) // [1 2 3 4 5]
+func Unique[T comparable](items []T) []T {
+	seen := make(map[T]struct{})
+	result := make([]T, 0, len(items))
+	for _, v := range items {
+		if _, ok := seen[v]; !ok {
+			seen[v] = struct{}{}
+			result = append(result, v)
+		}
+	}
+	return result
 }
