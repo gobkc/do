@@ -23,15 +23,30 @@ func OneOf[T any](condition bool, result1 T, result2 T) T {
 	return result2
 }
 
-func OneOr[T any](result1 T, result2 T) T {
-	v1 := reflect.ValueOf(result1)
-	if v1.Kind() == reflect.Pointer {
-		v1 = v1.Elem()
+func OneOr[T any](result1 T, result2 ...T) T {
+	isZero := func(v T) bool {
+		val := reflect.ValueOf(v)
+		if val.Kind() == reflect.Pointer {
+			if val.IsNil() {
+				return true
+			}
+			val = val.Elem()
+		}
+		return val.IsZero()
 	}
-	if v1.IsZero() {
-		return result2
+
+	if !isZero(result1) {
+		return result1
 	}
-	return result1
+
+	for _, v := range result2 {
+		if !isZero(v) {
+			return v
+		}
+	}
+
+	var zero T
+	return zero
 }
 
 func ErrorOr(err error, val string) string {
