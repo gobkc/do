@@ -486,14 +486,38 @@ func RegexpConvertSnake(s string) string {
 	})
 }
 
+func OptionDefault[T any](options []T, def T) T {
+	if len(options) == 0 {
+		return def
+	}
+	return options[0]
+}
+
+type Zeroable interface {
+	~int | ~int8 | ~int16 | ~int32 | ~int64 |
+		~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr |
+		~float32 | ~float64 |
+		~string
+}
+
 // Unique
 // data := []int{1, 2, 2, 3, 1, 4, 5, 3}
 // unique := Unique(data)
 // fmt.Println(unique) // [1 2 3 4 5]
-func Unique[T comparable](items []T) []T {
+func Unique[T Zeroable](items []T, patterns ...string) []T {
 	seen := make(map[T]struct{})
 	result := make([]T, 0, len(items))
+	var zero T
+	pattern := OptionDefault(patterns, ``)
 	for _, v := range items {
+		if v == zero {
+			continue
+		}
+		if pattern != `` {
+			if !RegexpCheck(pattern, fmt.Sprintf("%v", v)) {
+				continue
+			}
+		}
 		if _, ok := seen[v]; !ok {
 			seen[v] = struct{}{}
 			result = append(result, v)
