@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func BatchCall[P any, D any](ctx context.Context, params []P, limit int, f func(ctx context.Context, param []P) []D) []D {
+func BatchCall[D any, P any](ctx context.Context, params []P, limit int, f func(ctx context.Context, param []P) []D) []D {
 	var results = make([]D, 0, len(params))
 	for i := 0; i < len(params); i += limit {
 		if err := ctx.Err(); err != nil {
