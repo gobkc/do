@@ -18,6 +18,15 @@ func NewRedisStore(client *redis.Client) lock.Store {
 	}
 }
 
+func NewRedisStoreByDsn(dsn string) (store lock.Store, err error) {
+	opt, err := redis.ParseURL(dsn)
+	if err != nil {
+		return nil, err
+	}
+	client := redis.NewClient(opt)
+	return NewRedisStore(client), nil
+}
+
 func (s *RedisStore) SetNx(ctx context.Context, key, owner string, ttl time.Duration) (bool, error) {
 	res, err := s.client.SetArgs(ctx, key, owner, redis.SetArgs{
 		Mode: "NX",
