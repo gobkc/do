@@ -8,8 +8,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/rVNCu3HqELle0jiPLLBs70cWOduZpkS1E78=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
-github.com/gobkc/do/lock v0.0.0-20260224072834-6bdd89b4338c h1:bXG+oID7dyvuhAOBcL/14kNkbBt2rpB8Gz7URf8G5/Y=
-github.com/gobkc/do/lock v0.0.0-20260224072834-6bdd89b4338c/go.mod h1:PDanyzOw1NqE1DkyMcJ89xFwAxanAL4BtM/KSF8bAvU=
+github.com/gobkc/do/lock v0.0.0-20260224075625-91c5ab5a5dce h1:6EKZr67cS1NqK+u1P/0woa8+aSybPYhTs6qUzvP6SlU=
+github.com/gobkc/do/lock v0.0.0-20260224075625-91c5ab5a5dce/go.mod h1:IcO0lSB6L2vE5WKfbmRGI9u0La6ug+WjBIzzd4gGm8c=
 github.com/gobkc/do/lock/lockstore v0.0.0-20260224072834-6bdd89b4338c h1:SWZNAo6YM05wqPdxq281XYfCs0T3XSDxazqbLV5Zj7A=
 github.com/gobkc/do/lock/lockstore v0.0.0-20260224072834-6bdd89b4338c/go.mod h1:c1/2dId+pc/nd/wWE4E3u9dwXkR9/JeMaH21nE+XcG4=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
