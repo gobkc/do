@@ -26,3 +26,34 @@ func TryRunOnce(ctx context.Context, store Store, key string, owner string, ttl 
 		f()
 	}
 }
+
+// Run Always running
+func Run(ctx context.Context, store Store, key string, owner string, ttl time.Duration, interval time.Duration, handler func(ctx context.Context)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var acquired bool
+
+	for {
+		select {
+		case <-ctx.Done():
+			if acquired {
+				_ = store.Delete(context.Background(), key, owner)
+			}
+			return
+		case <-ticker.C:
+			if acquired {
+				// Permanent lock-up renewal
+				_, _ = store.SetNx(ctx, key, owner, ttl)
+				continue
+			}
+
+			// Try to snatch the lock
+			ok, _ := store.SetNx(ctx, key, owner, ttl)
+			if ok {
+				acquired = true
+				go handler(ctx)
+			}
+		}
+	}
+}

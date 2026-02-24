@@ -1,6 +1,12 @@
-module github.com/gobkc/do/lock
+module examples
 
-go 1.22.0
+go 1.25.2
+
+require (
+	github.com/gobkc/do/lock v0.0.0-20260224072834-6bdd89b4338c
+	github.com/gobkc/do/lock/lockstore v0.0.0-20260224072834-6bdd89b4338c
+	github.com/google/uuid v1.6.0
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
