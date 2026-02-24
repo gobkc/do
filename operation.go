@@ -123,7 +123,7 @@ func (r *ReTry[T]) Times(times int, action func(t *T) error) *T {
 	r.Do(func() {
 		r.value = new(T)
 		name := GetStructName(r.value)
-		for i := 0; i < times; i++ {
+		for range times {
 			if err := action(r.value); err != nil {
 				slog.Default().Error(`Failed to initialize `+name, slog.String(`error`, err.Error()))
 				time.Sleep(1 * time.Second)
