@@ -32,28 +32,35 @@ func Run(ctx context.Context, store Store, key string, owner string, ttl time.Du
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	var acquired bool
-
 	for {
 		select {
 		case <-ctx.Done():
-			if acquired {
-				_ = store.Delete(context.Background(), key, owner)
+			err := store.Delete(context.Background(), key, owner)
+			if err != nil {
+				slog.Error("failed to release lock",
+					slog.String(`key`, key),
+					slog.String(`owner`, owner),
+				)
 			}
 			return
 		case <-ticker.C:
-			if acquired {
-				// Permanent lock-up renewal
-				_, _ = store.SetNx(ctx, key, owner, ttl)
+			ok, err := store.SetNx(ctx, key, owner, ttl)
+			if err != nil || !ok {
 				continue
 			}
+			go func() {
+				defer func() {
+					err := store.Delete(context.Background(), key, owner)
+					if err != nil {
+						slog.Error("failed to release lock",
+							slog.String(`key`, key),
+							slog.String(`owner`, owner),
+						)
+					}
+				}()
 
-			// Try to snatch the lock
-			ok, _ := store.SetNx(ctx, key, owner, ttl)
-			if ok {
-				acquired = true
-				go handler(ctx)
-			}
+				handler(ctx)
+			}()
 		}
 	}
 }
