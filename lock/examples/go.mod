@@ -3,7 +3,7 @@ module examples
 go 1.25.2
 
 require (
-	github.com/gobkc/do/lock v0.0.0-20260224083426-b7605190b88f
+	github.com/gobkc/do/lock v0.0.0-20260224100715-2ca81669e640
 	github.com/gobkc/do/lock/lockstore v0.0.0-20260224072834-6bdd89b4338c
 	github.com/google/uuid v1.6.0
 )
