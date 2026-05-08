@@ -68,12 +68,36 @@ func (t *genericTask[T]) start(ctx context.Context, wg *sync.WaitGroup) (context
 }
 
 func (t *genericTask[T]) run(ctx context.Context) {
+	lockKey := "scheduler:lock:" + t.name
+
+	// 改动点：处理 interval 为 0 的情况
+	if t.interval <= 0 {
+		// 抢锁：如果抢不到说明其他 Pod 正在执行或已执行（在 lockTTL 时间内）
+		acquired, err := t.cache.SetNx(ctx, lockKey, t.runnerID, t.lockTTL)
+		if err != nil || !acquired {
+			return
+		}
+
+		jobCtx, jobCancel := context.WithCancel(ctx)
+		go t.watchdog(ctx, jobCancel, lockKey)
+
+		func() {
+			defer jobCancel()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("once task panic", "name", t.name, "recover", r)
+				}
+			}()
+			t.fn(jobCtx, t.dep)
+		}()
+		// 改动点：执行完即退出，且不主动调用 releaseLock，利用 lockTTL 确保其他 Pod 不会重复处理
+		return
+	}
+
 	ticker := time.NewTicker(t.interval)
 	defer ticker.Stop()
 
-	lockKey := "scheduler:lock:" + t.name
 	var jobWg sync.WaitGroup
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -84,34 +108,23 @@ func (t *genericTask[T]) run(ctx context.Context) {
 				continue
 			}
 
-			// 尝试获取分布式锁
 			acquired, err := t.cache.SetNx(ctx, lockKey, t.runnerID, t.lockTTL)
-			if err != nil {
-				slog.Error("lock error", "name", t.name, "err", err)
-				continue
-			}
-			if !acquired {
+			if err != nil || !acquired {
 				continue
 			}
 
-			// 抢锁成功
 			t.running.Store(true)
 			jobWg.Add(1)
 
-			// 为单次执行创建一个可取消的 context
 			jobCtx, jobCancel := context.WithCancel(ctx)
-
-			// 1. 启动看门狗：负责续期
 			go t.watchdog(ctx, jobCancel, lockKey)
 
-			// 2. 执行任务
 			go func() {
 				defer jobWg.Done()
-				defer jobCancel() // 任务结束通知看门狗停止
+				defer jobCancel()
 				defer t.running.Store(false)
-				defer t.releaseLock(lockKey)
+				defer t.releaseLock(lockKey) // 定时任务保留原有的主动释放逻辑
 
-				// 异常保护
 				defer func() {
 					if r := recover(); r != nil {
 						slog.Error("task panic", "name", t.name, "recover", r)
@@ -124,26 +137,20 @@ func (t *genericTask[T]) run(ctx context.Context) {
 	}
 }
 
-// watchdog 在任务运行期间自动续期，防止锁过期导致多个 Pod 同时运行
 func (t *genericTask[T]) watchdog(parentCtx context.Context, jobCancel context.CancelFunc, lockKey string) {
-	// 续期频率设为 TTL 的 1/3
 	ticker := time.NewTicker(t.lockTTL / 3)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-parentCtx.Done(): // 整个调度停止
+		case <-parentCtx.Done():
 			return
-		case <-time.After(t.lockTTL): // 安全防范：如果自己挂了，这里会触发
+		case <-time.After(t.lockTTL):
 			jobCancel()
 			return
 		case <-ticker.C:
-			// 检查任务是否已经通过 jobCancel 结束了
-			// 续期
 			ok, err := t.cache.Expire(parentCtx, lockKey, t.lockTTL)
 			if err != nil || !ok {
-				// 续期失败，可能锁被抢走或 Redis 挂了
-				// 为了安全，通知业务逻辑停止执行
 				slog.Warn("lock renewal failed, canceling job", "name", t.name)
 				jobCancel()
 				return
@@ -153,8 +160,6 @@ func (t *genericTask[T]) watchdog(parentCtx context.Context, jobCancel context.C
 }
 
 func (t *genericTask[T]) releaseLock(lockKey string) {
-	// 释放锁时使用 Background，确保即使父级 context 取消了也能尝试删除锁
-	// 但设置短超时，防止卡死
 	releaseCtx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
