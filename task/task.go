@@ -62,68 +62,69 @@ func (t *genericTask[T]) start(ctx context.Context, wg *sync.WaitGroup) (context
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		t.run(childCtx)
+		t.run(childCtx, wg)
 	}()
 	return cancel, nil
 }
 
-func (t *genericTask[T]) run(ctx context.Context) {
+func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 	lockKey := "scheduler:lock:" + t.name
 
-	// 改动点：处理 interval 为 0 的情况
+	// 改动点：Once 任务不续期、不释放，执行完即结束
 	if t.interval <= 0 {
-		// 抢锁：如果抢不到说明其他 Pod 正在执行或已执行（在 lockTTL 时间内）
 		acquired, err := t.cache.SetNx(ctx, lockKey, t.runnerID, t.lockTTL)
 		if err != nil || !acquired {
 			return
 		}
-
-		jobCtx, jobCancel := context.WithCancel(ctx)
-		go t.watchdog(ctx, jobCancel, lockKey)
-
 		func() {
-			defer jobCancel()
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("once task panic", "name", t.name, "recover", r)
 				}
 			}()
-			t.fn(jobCtx, t.dep)
+			t.fn(ctx, t.dep)
 		}()
-		// 改动点：执行完即退出，且不主动调用 releaseLock，利用 lockTTL 确保其他 Pod 不会重复处理
 		return
 	}
 
-	ticker := time.NewTicker(t.interval)
-	defer ticker.Stop()
+	// 改动点：改用 Timer 模式，确保 interval 是任务结束后的间隔，避免 Ticker 积压
+	timer := time.NewTimer(t.interval)
+	defer timer.Stop()
 
-	var jobWg sync.WaitGroup
 	for {
 		select {
 		case <-ctx.Done():
-			jobWg.Wait()
 			return
-		case <-ticker.C:
-			if t.running.Load() {
+		case <-timer.C:
+			// 改动点：使用 CAS 进行原子状态切换，解决竞争条件
+			if !t.running.CompareAndSwap(false, true) {
+				timer.Reset(t.interval)
 				continue
 			}
 
 			acquired, err := t.cache.SetNx(ctx, lockKey, t.runnerID, t.lockTTL)
 			if err != nil || !acquired {
+				t.running.Store(false)
+				timer.Reset(t.interval)
 				continue
 			}
 
-			t.running.Store(true)
-			jobWg.Add(1)
-
 			jobCtx, jobCancel := context.WithCancel(ctx)
-			go t.watchdog(ctx, jobCancel, lockKey)
+			wg.Add(2)
+
+			// 改动点：Watchdog 失败时调用 jobCancel，确保业务逻辑立即感知锁权丧失
+			go func() {
+				defer wg.Done()
+				t.watchdog(jobCtx, jobCancel, lockKey)
+			}()
 
 			go func() {
-				defer jobWg.Done()
+				defer wg.Done()
 				defer jobCancel()
 				defer t.running.Store(false)
-				defer t.releaseLock(lockKey) // 定时任务保留原有的主动释放逻辑
+				defer t.releaseLock(lockKey)
+				// 改动点：任务结束后才重置 Timer
+				defer timer.Reset(t.interval)
 
 				defer func() {
 					if r := recover(); r != nil {
@@ -137,22 +138,19 @@ func (t *genericTask[T]) run(ctx context.Context) {
 	}
 }
 
-func (t *genericTask[T]) watchdog(parentCtx context.Context, jobCancel context.CancelFunc, lockKey string) {
+func (t *genericTask[T]) watchdog(jobCtx context.Context, jobCancel context.CancelFunc, lockKey string) {
 	ticker := time.NewTicker(t.lockTTL / 3)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-parentCtx.Done():
-			return
-		case <-time.After(t.lockTTL):
-			jobCancel()
+		case <-jobCtx.Done():
 			return
 		case <-ticker.C:
-			ok, err := t.cache.Expire(parentCtx, lockKey, t.lockTTL)
+			ok, err := t.cache.Expire(jobCtx, lockKey, t.lockTTL)
 			if err != nil || !ok {
 				slog.Warn("lock renewal failed, canceling job", "name", t.name)
-				jobCancel()
+				jobCancel() // 改动点：必须取消任务，防止 Split-brain
 				return
 			}
 		}
@@ -162,9 +160,6 @@ func (t *genericTask[T]) watchdog(parentCtx context.Context, jobCancel context.C
 func (t *genericTask[T]) releaseLock(lockKey string) {
 	releaseCtx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
-
-	val, err := t.cache.Get(releaseCtx, lockKey)
-	if err == nil && val == t.runnerID {
-		_ = t.cache.Del(releaseCtx, lockKey)
-	}
+	// 改动点：使用新增的 CompareAndDelete 接口，内部通过 Lua 实现原子删除
+	_ = t.cache.CompareAndDelete(releaseCtx, lockKey, t.runnerID)
 }

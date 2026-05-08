@@ -11,6 +11,7 @@ type Cache interface {
 	SetNx(ctx context.Context, key string, value any, expiration time.Duration) (bool, error)
 	Del(ctx context.Context, key string) error
 	Expire(ctx context.Context, key string, expiration time.Duration) (bool, error)
+	CompareAndDelete(ctx context.Context, key string, expectedValue string) error
 }
 
 type taskRunner interface {
