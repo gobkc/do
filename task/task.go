@@ -70,7 +70,6 @@ func (t *genericTask[T]) start(ctx context.Context, wg *sync.WaitGroup) (context
 func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 	lockKey := "scheduler:lock:" + t.name
 
-	// 改动点：Once 任务不续期、不释放，执行完即结束
 	if t.interval <= 0 {
 		acquired, err := t.cache.SetNx(ctx, lockKey, t.runnerID, t.lockTTL)
 		if err != nil || !acquired {
@@ -87,8 +86,8 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 		return
 	}
 
-	// 改动点：改用 Timer 模式，确保 interval 是任务结束后的间隔，避免 Ticker 积压
-	timer := time.NewTimer(t.interval)
+	// 改动点：设置 Timer 为 0 从而实现启动后立即触发一次执行尝试
+	timer := time.NewTimer(0)
 	defer timer.Stop()
 
 	for {
@@ -96,7 +95,6 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			// 改动点：使用 CAS 进行原子状态切换，解决竞争条件
 			if !t.running.CompareAndSwap(false, true) {
 				timer.Reset(t.interval)
 				continue
@@ -105,6 +103,7 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 			acquired, err := t.cache.SetNx(ctx, lockKey, t.runnerID, t.lockTTL)
 			if err != nil || !acquired {
 				t.running.Store(false)
+				// 改动点：抢锁失败也需要重置定时器，进入下一个周期的竞争
 				timer.Reset(t.interval)
 				continue
 			}
@@ -112,7 +111,6 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 			jobCtx, jobCancel := context.WithCancel(ctx)
 			wg.Add(2)
 
-			// 改动点：Watchdog 失败时调用 jobCancel，确保业务逻辑立即感知锁权丧失
 			go func() {
 				defer wg.Done()
 				t.watchdog(jobCtx, jobCancel, lockKey)
@@ -123,7 +121,7 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 				defer jobCancel()
 				defer t.running.Store(false)
 				defer t.releaseLock(lockKey)
-				// 改动点：任务结束后才重置 Timer
+				// 改动点：任务执行完成后，根据 interval 重置定时器，实现“执行完后再等 interval”
 				defer timer.Reset(t.interval)
 
 				defer func() {
@@ -150,7 +148,7 @@ func (t *genericTask[T]) watchdog(jobCtx context.Context, jobCancel context.Canc
 			ok, err := t.cache.Expire(jobCtx, lockKey, t.lockTTL)
 			if err != nil || !ok {
 				slog.Warn("lock renewal failed, canceling job", "name", t.name)
-				jobCancel() // 改动点：必须取消任务，防止 Split-brain
+				jobCancel()
 				return
 			}
 		}
@@ -160,6 +158,5 @@ func (t *genericTask[T]) watchdog(jobCtx context.Context, jobCancel context.Canc
 func (t *genericTask[T]) releaseLock(lockKey string) {
 	releaseCtx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
-	// 改动点：使用新增的 CompareAndDelete 接口，内部通过 Lua 实现原子删除
 	_ = t.cache.CompareAndDelete(releaseCtx, lockKey, t.runnerID)
 }
