@@ -1,4 +1,4 @@
-module gihub.com/gobkc/do/exporter/excel
+module github.com/gobkc/do/exporter/excel
 
 go 1.24.0
 
