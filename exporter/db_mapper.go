@@ -2,6 +2,7 @@ package exporter
 
 import (
 	"database/sql"
+	"fmt"
 	"reflect"
 )
 
@@ -51,20 +52,43 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter, mapper func(*T)
 		var item T
 		valElement := reflect.ValueOf(&item).Elem()
 
-		scanArgs := make([]any, len(cols))
-		for i, colName := range cols {
-			if sIdx, ok := dbColToStructIdx[colName]; ok {
-				scanArgs[i] = valElement.Field(sIdx).Addr().Interface()
-			} else {
-				var discard any
-				scanArgs[i] = &discard
-			}
+		scanValues := make([]any, len(cols))
+		scanPointers := make([]any, len(cols))
+		for i := range scanValues {
+			scanPointers[i] = &scanValues[i]
 		}
 
-		if err := rows.Scan(scanArgs...); err != nil {
+		if err := rows.Scan(scanPointers...); err != nil {
 			return err
 		}
 
+		for i, colName := range cols {
+			rawVal := scanValues[i]
+			if rawVal == nil {
+				continue
+			}
+
+			if sIdx, ok := dbColToStructIdx[colName]; ok {
+				field := valElement.Field(sIdx)
+				if !field.CanSet() {
+					continue
+				}
+
+				v := reflect.ValueOf(rawVal)
+
+				if field.Kind() == reflect.String && v.Kind() == reflect.Slice {
+					field.SetString(fmt.Sprintf("%s", rawVal))
+				} else {
+					if v.Type().ConvertibleTo(field.Type()) {
+						field.Set(v.Convert(field.Type()))
+					} else {
+						if field.Kind() == reflect.String {
+							field.SetString(fmt.Sprintf("%v", rawVal))
+						}
+					}
+				}
+			}
+		}
 		if mapper != nil {
 			if err := mapper(&item); err != nil {
 				return err
@@ -73,8 +97,7 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter, mapper func(*T)
 
 		rowValues := make([]any, len(structFieldIndexes))
 		for i, sIdx := range structFieldIndexes {
-			fieldVal := valElement.Field(sIdx).Interface()
-			rowValues[i] = fieldVal
+			rowValues[i] = valElement.Field(sIdx).Interface()
 		}
 
 		if err := exp.WriteRow(rowValues); err != nil {
