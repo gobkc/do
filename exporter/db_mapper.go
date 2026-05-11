@@ -5,7 +5,7 @@ import (
 	"reflect"
 )
 
-func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter) error {
+func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter, mapper func(*T) error) error {
 	defer rows.Close()
 
 	var dummy T
@@ -15,10 +15,9 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter) error {
 	}
 
 	var headers []any
+	var structFieldIndexes []int
 	dbColToStructIdx := make(map[string]int)
-	structIdxToHeaderIdx := make(map[int]int)
 
-	headerIdx := 0
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
 		xlsxTag := f.Tag.Get("xlsx")
@@ -26,12 +25,17 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter) error {
 		if dbTag == "" {
 			dbTag = f.Name
 		}
-		if xlsxTag != "" {
-			headers = append(headers, xlsxTag)
-			structIdxToHeaderIdx[i] = headerIdx
-			dbColToStructIdx[dbTag] = i
-			headerIdx++
+
+		if xlsxTag == "" || xlsxTag == "-" {
+			if f.Tag.Get("db") != "" || f.Tag.Get("xlsx") != "-" {
+				dbColToStructIdx[dbTag] = i
+			}
+			continue
 		}
+
+		headers = append(headers, xlsxTag)
+		structFieldIndexes = append(structFieldIndexes, i)
+		dbColToStructIdx[dbTag] = i
 	}
 
 	if err := exp.WriteHeaders(headers); err != nil {
@@ -43,37 +47,34 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter) error {
 		return err
 	}
 
-	colToHeaderIdx := make([]int, len(cols))
-	for i, col := range cols {
-		colToHeaderIdx[i] = -1
-		if sIdx, ok := dbColToStructIdx[col]; ok {
-			if hIdx, ok := structIdxToHeaderIdx[sIdx]; ok {
-				colToHeaderIdx[i] = hIdx
+	for rows.Next() {
+		var item T
+		valElement := reflect.ValueOf(&item).Elem()
+
+		scanArgs := make([]any, len(cols))
+		for i, colName := range cols {
+			if sIdx, ok := dbColToStructIdx[colName]; ok {
+				scanArgs[i] = valElement.Field(sIdx).Addr().Interface()
+			} else {
+				var discard any
+				scanArgs[i] = &discard
 			}
 		}
-	}
 
-	scanArgs := make([]any, len(cols))
-	scanValues := make([]any, len(cols))
-	for i := range scanArgs {
-		scanArgs[i] = &scanValues[i]
-	}
-
-	for rows.Next() {
 		if err := rows.Scan(scanArgs...); err != nil {
 			return err
 		}
 
-		rowValues := make([]any, len(headers))
-		for i, val := range scanValues {
-			hIdx := colToHeaderIdx[i]
-			if hIdx != -1 {
-				if b, ok := val.([]byte); ok {
-					rowValues[hIdx] = string(b)
-				} else {
-					rowValues[hIdx] = val
-				}
+		if mapper != nil {
+			if err := mapper(&item); err != nil {
+				return err
 			}
+		}
+
+		rowValues := make([]any, len(structFieldIndexes))
+		for i, sIdx := range structFieldIndexes {
+			fieldVal := valElement.Field(sIdx).Interface()
+			rowValues[i] = fieldVal
 		}
 
 		if err := exp.WriteRow(rowValues); err != nil {
