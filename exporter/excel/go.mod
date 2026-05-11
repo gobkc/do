@@ -1,6 +1,6 @@
 module gihub.com/gobkc/do/exporter/excel
 
-go 1.25.2
+go 1.24.0
 
 require github.com/xuri/excelize/v2 v2.10.1
 
