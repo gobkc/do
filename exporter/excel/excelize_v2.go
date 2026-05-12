@@ -1,4 +1,4 @@
-package excelizev2
+package excel
 
 import (
 	"fmt"
