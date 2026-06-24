@@ -1,6 +1,6 @@
 module github.com/gobkc/do/curd/postgres
 
-go 1.26.4
+go 1.24.0
 
 require (
 	github.com/gobkc/do/curd v0.0.0-20260624183304-3de19f2da4dd
