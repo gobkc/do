@@ -13,22 +13,73 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const (
+	defaultMaxIdleConns    = 10
+	defaultMaxOpenConns    = 50
+	defaultConnMaxLifetime = 30 * time.Minute
+	defaultConnMaxIdleTime = 5 * time.Minute
+)
+
+// PoolOption is a functional option for configuring Pool.
+type PoolOption func(*poolConfig)
+
+type poolConfig struct {
+	maxIdleConns    int
+	maxOpenConns    int
+	connMaxLifetime time.Duration
+	connMaxIdleTime time.Duration
+}
+
+func defaultPoolConfig() *poolConfig {
+	return &poolConfig{
+		maxIdleConns:    defaultMaxIdleConns,
+		maxOpenConns:    defaultMaxOpenConns,
+		connMaxLifetime: defaultConnMaxLifetime,
+		connMaxIdleTime: defaultConnMaxIdleTime,
+	}
+}
+
+// WithMaxIdleConns sets the maximum number of idle connections in the pool.
+func WithMaxIdleConns(n int) PoolOption {
+	return func(c *poolConfig) { c.maxIdleConns = n }
+}
+
+// WithMaxOpenConns sets the maximum number of open connections in the pool.
+func WithMaxOpenConns(n int) PoolOption {
+	return func(c *poolConfig) { c.maxOpenConns = n }
+}
+
+// WithConnMaxLifetime sets the maximum lifetime of a connection.
+func WithConnMaxLifetime(d time.Duration) PoolOption {
+	return func(c *poolConfig) { c.connMaxLifetime = d }
+}
+
+// WithConnMaxIdleTime sets the maximum idle time of a connection.
+func WithConnMaxIdleTime(d time.Duration) PoolOption {
+	return func(c *poolConfig) { c.connMaxIdleTime = d }
+}
+
 type Pool struct {
 	pool *pgxpool.Pool
 }
 
-func NewPool(dsn string, maxIdleConns, maxOpenConns int, connMaxLifetime int) (*Pool, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
+func NewPool(dsn string, opts ...PoolOption) (*Pool, error) {
+	cfg := defaultPoolConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse pool config: %w", err)
 	}
 
-	cfg.MaxConns = int32(maxOpenConns)
-	cfg.MinConns = int32(maxIdleConns)
-	cfg.MaxConnLifetime = time.Duration(connMaxLifetime) * time.Minute
-	cfg.MaxConnIdleTime = 5 * time.Minute
+	poolCfg.MaxConns = int32(cfg.maxOpenConns)
+	poolCfg.MinConns = int32(cfg.maxIdleConns)
+	poolCfg.MaxConnLifetime = cfg.connMaxLifetime
+	poolCfg.MaxConnIdleTime = cfg.connMaxIdleTime
 
-	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
 	}
@@ -41,8 +92,8 @@ func NewPool(dsn string, maxIdleConns, maxOpenConns int, connMaxLifetime int) (*
 	}
 
 	slog.Info("pgx pool created",
-		slog.Int("maxConns", maxOpenConns),
-		slog.Int("minConns", maxIdleConns),
+		slog.Int("maxConns", cfg.maxOpenConns),
+		slog.Int("minConns", cfg.maxIdleConns),
 	)
 	return &Pool{pool: pool}, nil
 }

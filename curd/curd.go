@@ -3,30 +3,106 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"time"
 )
+
+// globalSQLLog controls SQL logging for standalone functions (QueryRaw, ExecRaw, etc.).
+var globalSQLLog bool
+
+// SetGlobalSQLLog enables or disables SQL logging for standalone functions.
+func SetGlobalSQLLog(enabled bool) {
+	globalSQLLog = enabled
+}
+
+// CurdOption is a functional option for configuring Curd.
+type CurdOption func(*curdConfig)
+
+type curdConfig struct {
+	sqlLogEnabled bool
+}
+
+// WithSQLLogging enables SQL logging for all operations on this Curd instance.
+// When enabled, every CRUD operation will log the generated SQL and arguments
+// via slog at Info level.
+func WithSQLLogging() CurdOption {
+	return func(c *curdConfig) { c.sqlLogEnabled = true }
+}
 
 type Table interface {
 	TableName() string
 }
 
 type Curd[T Table] struct {
-	q       Querier
-	fm      FieldMapper
-	dialect Dialect
+	q          Querier
+	fm         FieldMapper
+	dialect    Dialect
+	transforms []FieldTransformer
+	sqlLog     bool
 }
 
-func New[T Table](q Querier, fm FieldMapper, d Dialect) *Curd[T] {
+func New[T Table](q Querier, fm FieldMapper, d Dialect, opts ...CurdOption) *Curd[T] {
 	if fm == nil {
 		fm = defaultFieldMapper{}
 	}
-	return &Curd[T]{q: q, fm: fm, dialect: d}
+	cfg := &curdConfig{}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	return &Curd[T]{q: q, fm: fm, dialect: d, sqlLog: cfg.sqlLogEnabled}
 }
 
 func (c *Curd[T]) WithQuerier(q Querier) *Curd[T] {
-	return &Curd[T]{q: q, fm: c.fm, dialect: c.dialect}
+	return &Curd[T]{q: q, fm: c.fm, dialect: c.dialect, transforms: c.transforms, sqlLog: c.sqlLog}
+}
+
+// WithSQLLog returns a new Curd with SQL logging enabled or disabled for
+// subsequent operations. This allows per-operation control over logging.
+//
+// Usage:
+//
+//	// Log only this specific insert:
+//	c.WithSQLLog(true).InsertOne(ctx, row)
+//	// Subsequent operations on c are unaffected.
+func (c *Curd[T]) WithSQLLog(enabled bool) *Curd[T] {
+	return &Curd[T]{q: c.q, fm: c.fm, dialect: c.dialect, transforms: c.transforms, sqlLog: enabled}
+}
+
+// WithTransformer returns a new Curd that applies the given FieldTransformer
+// to field values during insert operations. Multiple transformers can be
+// composed with ComposeTransformers or by chaining WithTransformer calls.
+//
+// Usage:
+//
+//	c := New[MyTable](pool, nil, postgres.Dialect{}).
+//	    WithTransformer(JSONBMarshaler("metadata", "config"))
+func (c *Curd[T]) WithTransformer(t FieldTransformer) *Curd[T] {
+	transforms := make([]FieldTransformer, len(c.transforms), len(c.transforms)+1)
+	copy(transforms, c.transforms)
+	transforms = append(transforms, t)
+	return &Curd[T]{q: c.q, fm: c.fm, dialect: c.dialect, transforms: transforms, sqlLog: c.sqlLog}
+}
+
+func (c *Curd[T]) logSQL(ctx context.Context, query string, args ...any) {
+	if !c.sqlLog {
+		return
+	}
+	slog.InfoContext(ctx, "curd sql",
+		slog.String("query", query),
+		slog.Any("args", args),
+	)
+}
+
+func logSQLGlobal(ctx context.Context, query string, args ...any) {
+	if !globalSQLLog {
+		return
+	}
+	slog.InfoContext(ctx, "curd sql",
+		slog.String("query", query),
+		slog.Any("args", args),
+	)
 }
 
 func (c *Curd[T]) FindAll(ctx context.Context, where map[string]any, orderBy string, limit, offset int) ([]T, error) {
@@ -58,6 +134,7 @@ func (c *Curd[T]) FindAll(ctx context.Context, where map[string]any, orderBy str
 		args = append(args, offset)
 	}
 
+	c.logSQL(ctx, query, args...)
 	rows, err := c.q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("findAll %s: %w", tableName, err)
@@ -90,7 +167,7 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 	setNow(v, "CreatedDate")
 	setNow(v, "ChangedDate")
 
-	cols, vals := rowValues(v, c.fm)
+	cols, vals := rowValues(v, c.fm, c.transforms...)
 	placeholders := make([]string, len(vals))
 	args := make([]any, len(vals))
 	for i := range vals {
@@ -107,6 +184,7 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 		tableName, strings.Join(cols, ","), strings.Join(placeholders, ","), returningClause)
 
 	if returningClause != "" {
+		c.logSQL(ctx, query, args...)
 		var id int64
 		if err := c.q.QueryRow(ctx, query, args...).Scan(&id); err != nil {
 			return fmt.Errorf("insert %s: %w", tableName, err)
@@ -114,6 +192,7 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 		setField(v, "ID", id)
 		return nil
 	}
+	c.logSQL(ctx, query, args...)
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("insert %s: %w", tableName, err)
@@ -126,16 +205,24 @@ func (c *Curd[T]) InsertBatch(ctx context.Context, rows []T) error {
 		return nil
 	}
 	tableName := rows[0].TableName()
-	cols := columnsFromType(reflect.TypeOf(rows[0]), c.fm)
+
+	// Derive the column list from the first row's rowValues so that
+	// columns skipped by rowValues (e.g. zero-value ID) are consistent.
+	pv0 := reflect.ValueOf(&rows[0])
+	setNow(pv0, "CreatedDate")
+	setNow(pv0, "ChangedDate")
+	cols, _ := rowValues(pv0.Elem(), c.fm, c.transforms...)
 
 	placeholders := make([]string, len(rows))
 	args := []any{}
 	argIdx := 1
 	for i := range rows {
 		pv := reflect.ValueOf(&rows[i])
-		setNow(pv, "CreatedDate")
-		setNow(pv, "ChangedDate")
-		_, vals := rowValues(pv.Elem(), c.fm)
+		if i > 0 {
+			setNow(pv, "CreatedDate")
+			setNow(pv, "ChangedDate")
+		}
+		_, vals := rowValues(pv.Elem(), c.fm, c.transforms...)
 		ph := make([]string, len(vals))
 		for j := range vals {
 			ph[j] = c.dialect.Placeholder(argIdx)
@@ -146,6 +233,7 @@ func (c *Curd[T]) InsertBatch(ctx context.Context, rows []T) error {
 	}
 
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", tableName, strings.Join(cols, ","), strings.Join(placeholders, ","))
+	c.logSQL(ctx, query, args...)
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("insert batch %s: %w", tableName, err)
@@ -175,6 +263,7 @@ func (c *Curd[T]) UpdateByID(ctx context.Context, id any, updates map[string]any
 		argIdx++
 	}
 	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = %s", tableName, strings.Join(setClauses, ","), c.dialect.Placeholder(1))
+	c.logSQL(ctx, query, args...)
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update %s: %w", tableName, err)
@@ -200,6 +289,7 @@ func (c *Curd[T]) UpdateWhere(ctx context.Context, where map[string]any, updates
 		argIdx++
 	}
 	query := fmt.Sprintf("UPDATE %s SET %s WHERE %s", tableName, strings.Join(setClauses, ","), strings.Join(whereClauses, " AND "))
+	c.logSQL(ctx, query, args...)
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update where %s: %w", tableName, err)
@@ -212,11 +302,14 @@ func (c *Curd[T]) DeleteByID(ctx context.Context, id any, hard bool) error {
 	tableName := t.TableName()
 	if hard {
 		query := fmt.Sprintf("DELETE FROM %s WHERE id = %s", tableName, c.dialect.Placeholder(1))
+		c.logSQL(ctx, query, id)
 		_, err := c.q.Exec(ctx, query, id)
 		return err
 	}
 	query := fmt.Sprintf("UPDATE %s SET deleted_date = %s WHERE id = %s", tableName, c.dialect.Placeholder(1), c.dialect.Placeholder(2))
-	_, err := c.q.Exec(ctx, query, time.Now(), id)
+	args := []any{time.Now(), id}
+	c.logSQL(ctx, query, args...)
+	_, err := c.q.Exec(ctx, query, args...)
 	return err
 }
 
@@ -225,6 +318,7 @@ func (c *Curd[T]) DeleteWhere(ctx context.Context, where map[string]any) error {
 	tableName := t.TableName()
 	conditions, args := buildWhere(where, &argCounter{idx: 1}, c.dialect)
 	query := fmt.Sprintf("DELETE FROM %s WHERE %s", tableName, strings.Join(conditions, " AND "))
+	c.logSQL(ctx, query, args...)
 	_, err := c.q.Exec(ctx, query, args...)
 	return err
 }
@@ -240,8 +334,10 @@ func (c *Curd[T]) Count(ctx context.Context, where map[string]any) (int64, error
 	if len(conditions) > 0 {
 		whereClause = " WHERE " + strings.Join(conditions, " AND ")
 	}
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s%s", tableName, whereClause)
 	var count int64
-	err := c.q.QueryRow(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s%s", tableName, whereClause), args...).Scan(&count)
+	c.logSQL(ctx, query, args...)
+	err := c.q.QueryRow(ctx, query, args...).Scan(&count)
 	return count, err
 }
 
@@ -254,11 +350,13 @@ func (c *Curd[T]) Exists(ctx context.Context, where map[string]any) (bool, error
 	}
 	var exists bool
 	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE %s)", tableName, strings.Join(conditions, " AND "))
+	c.logSQL(ctx, query, args...)
 	err := c.q.QueryRow(ctx, query, args...).Scan(&exists)
 	return exists, err
 }
 
 func QueryRaw[T any](ctx context.Context, q Querier, query string, args ...any) ([]T, error) {
+	logSQLGlobal(ctx, query, args...)
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query raw: %w", err)
@@ -269,6 +367,7 @@ func QueryRaw[T any](ctx context.Context, q Querier, query string, args ...any) 
 
 func QueryRowRaw[T any](ctx context.Context, q Querier, query string, args ...any) (T, error) {
 	var zero T
+	logSQLGlobal(ctx, query, args...)
 	row := q.QueryRow(ctx, query, args...)
 	result, err := scanRowWithMapper[T](row, rawFieldMapper{})
 	if err != nil {
@@ -278,6 +377,7 @@ func QueryRowRaw[T any](ctx context.Context, q Querier, query string, args ...an
 }
 
 func ExecRaw(ctx context.Context, q Querier, sql string, args ...any) (int64, error) {
+	logSQLGlobal(ctx, sql, args...)
 	tag, err := q.Exec(ctx, sql, args...)
 	if err != nil {
 		return 0, fmt.Errorf("exec raw: %w", err)

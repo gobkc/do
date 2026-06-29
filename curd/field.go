@@ -76,7 +76,7 @@ func columnsFromType(t reflect.Type, fm FieldMapper) []string {
 	return cols
 }
 
-func rowValues(v reflect.Value, fm FieldMapper) ([]string, []any) {
+func rowValues(v reflect.Value, fm FieldMapper, transforms ...FieldTransformer) ([]string, []any) {
 	t := v.Type()
 	var cols []string
 	var vals []any
@@ -86,8 +86,17 @@ func rowValues(v reflect.Value, fm FieldMapper) ([]string, []any) {
 		if name == "" {
 			continue
 		}
+		// Skip auto-generated ID field when its value is zero,
+		// so the database can assign a sequence value.
+		if f.Name == "ID" && v.Field(i).IsZero() {
+			continue
+		}
 		cols = append(cols, name)
-		vals = append(vals, v.Field(i).Interface())
+		val := v.Field(i).Interface()
+		for _, t := range transforms {
+			val = t(name, val)
+		}
+		vals = append(vals, val)
 	}
 	return cols, vals
 }

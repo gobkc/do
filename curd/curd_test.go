@@ -1412,3 +1412,395 @@ func TestBuildWhereEmptyMap(t *testing.T) {
 		t.Errorf("expected 0 args, got %d", len(args))
 	}
 }
+
+// --- Transaction timeout tests ---
+
+func TestWithTxTimeoutSuccess(t *testing.T) {
+	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
+	tx := &mockTx{Querier: q}
+	tb := &mockTxBeginner{tx: tx}
+
+	called := false
+	err := WithTxTimeout(context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) error {
+		called = true
+		// Verify context has a deadline
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("context should have a deadline")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WithTxTimeout error: %v", err)
+	}
+	if !called {
+		t.Error("fn should have been called")
+	}
+	if !tx.committed {
+		t.Error("tx should be committed")
+	}
+}
+
+func TestWithTxTimeoutFnError(t *testing.T) {
+	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
+	tx := &mockTx{Querier: q}
+	tb := &mockTxBeginner{tx: tx}
+
+	testErr := errors.New("timeout fn error")
+	err := WithTxTimeout(context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) error {
+		return testErr
+	})
+	if err == nil {
+		t.Error("expected error from fn")
+	}
+	if !tx.rolledBack {
+		t.Error("tx should be rolled back on error")
+	}
+}
+
+func TestWithTxResultTimeoutSuccess(t *testing.T) {
+	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
+	tx := &mockTx{Querier: q}
+	tb := &mockTxBeginner{tx: tx}
+
+	result, err := WithTxResultTimeout[int](context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) (int, error) {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("context should have a deadline")
+		}
+		return 99, nil
+	})
+	if err != nil {
+		t.Fatalf("WithTxResultTimeout error: %v", err)
+	}
+	if result != 99 {
+		t.Errorf("expected 99, got %d", result)
+	}
+	if !tx.committed {
+		t.Error("tx should be committed")
+	}
+}
+
+func TestWithTxResultTimeoutFnError(t *testing.T) {
+	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
+	tx := &mockTx{Querier: q}
+	tb := &mockTxBeginner{tx: tx}
+
+	_, err := WithTxResultTimeout[int](context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) (int, error) {
+		return 0, errors.New("timeout error")
+	})
+	if err == nil {
+		t.Error("expected fn error")
+	}
+	if !tx.rolledBack {
+		t.Error("tx should be rolled back on error")
+	}
+}
+
+// --- Field transformer tests ---
+
+type testTableWithJSONB struct {
+	ID       int64          `json:"id"`
+	Metadata map[string]any `json:"metadata"`
+	Config   map[string]any `json:"config"`
+}
+
+func (testTableWithJSONB) TableName() string { return "test_jsonb" }
+
+type testTableWithXML struct {
+	ID       int64  `json:"id"`
+	Document string `json:"document"`
+}
+
+func (testTableWithXML) TableName() string { return "test_xml" }
+
+func TestJSONBMarshaler(t *testing.T) {
+	transformer := JSONBMarshaler("metadata")
+
+	// Field in the set should be marshaled
+	result := transformer("metadata", map[string]any{"key": "value"})
+	str, ok := result.(string)
+	if !ok {
+		t.Fatalf("expected string, got %T", result)
+	}
+	if str != `{"key":"value"}` {
+		t.Errorf("expected JSON string, got %q", str)
+	}
+
+	// Field not in the set should pass through
+	result = transformer("other", 42)
+	if result != 42 {
+		t.Errorf("expected 42, got %v", result)
+	}
+
+	// Nil value should pass through
+	result = transformer("metadata", nil)
+	if result != nil {
+		t.Errorf("expected nil, got %v", result)
+	}
+}
+
+func TestJSONBMarshalerComplexStruct(t *testing.T) {
+	transformer := JSONBMarshaler("config")
+
+	type nested struct {
+		A string `json:"a"`
+		B int    `json:"b"`
+	}
+	result := transformer("config", nested{A: "hello", B: 123})
+	str, ok := result.(string)
+	if !ok {
+		t.Fatalf("expected string, got %T", result)
+	}
+	if str != `{"a":"hello","b":123}` {
+		t.Errorf("expected JSON, got %q", str)
+	}
+}
+
+func TestXMLMarshaler(t *testing.T) {
+	transformer := XMLMarshaler("document")
+
+	type doc struct {
+		XMLName struct{} `xml:"root"`
+		Title   string   `xml:"title"`
+		Body    string   `xml:"body"`
+	}
+
+	result := transformer("document", doc{Title: "Test", Body: "Content"})
+	str, ok := result.(string)
+	if !ok {
+		t.Fatalf("expected string, got %T", result)
+	}
+	if str != `<root><title>Test</title><body>Content</body></root>` {
+		t.Errorf("expected XML string, got %q", str)
+	}
+
+	// Field not in the set should pass through
+	result = transformer("other_field", 100)
+	if result != 100 {
+		t.Errorf("expected 100, got %v", result)
+	}
+
+	// Nil value should pass through
+	result = transformer("document", nil)
+	if result != nil {
+		t.Errorf("expected nil, got %v", result)
+	}
+}
+
+func TestComposeTransformers(t *testing.T) {
+	// Use transformers for non-overlapping fields
+	composed := ComposeTransformers(
+		JSONBMarshaler("metadata"),
+		XMLMarshaler("document"),
+	)
+
+	// JSONB field
+	result := composed("metadata", map[string]any{"a": 1})
+	str, ok := result.(string)
+	if !ok {
+		t.Fatalf("expected string from JSONB marshaler, got %T", result)
+	}
+	if str != `{"a":1}` {
+		t.Errorf("expected JSON, got %q", str)
+	}
+
+	// XML field
+	type doc struct {
+		XMLName struct{} `xml:"node"`
+		Val     string   `xml:"val"`
+	}
+	result = composed("document", doc{Val: "x"})
+	str, ok = result.(string)
+	if !ok {
+		t.Fatalf("expected string from XML marshaler, got %T", result)
+	}
+	if str != `<node><val>x</val></node>` {
+		t.Errorf("expected XML, got %q", str)
+	}
+
+	// Field not in any set
+	result = composed("name", "john")
+	if result != "john" {
+		t.Errorf("expected 'john', got %v", result)
+	}
+}
+
+func TestComposeTransformersOverride(t *testing.T) {
+	// When both match the same field, transformers are applied in order.
+	// JSONBMarshaler runs first (struct → JSON string),
+	// then XMLMarshaler runs (XML-encodes the JSON string).
+	composed := ComposeTransformers(
+		JSONBMarshaler("data"),
+		XMLMarshaler("data"),
+	)
+
+	type doc struct {
+		XMLName struct{} `xml:"item"`
+		Value   string   `xml:"value"`
+	}
+	result := composed("data", doc{Value: "test"})
+	str, ok := result.(string)
+	if !ok {
+		t.Fatalf("expected string, got %T", result)
+	}
+	// The struct was JSON-marshaled first, then that JSON string was XML-encoded.
+	// xml.Marshal on a string produces <string>...</string> wrapping.
+	if str == "" {
+		t.Error("expected non-empty result")
+	}
+	// Verify the last transformer (XML) was applied: the result should contain XML tags
+	if str[:1] != "<" {
+		t.Error("expected XML-encoded output to start with '<'")
+	}
+}
+
+func TestCurdWithTransformerInsertOne(t *testing.T) {
+	mock := &mockQuerier{
+		queryRow: &mockRow{record: []any{int64(1)}},
+	}
+
+	c := New[testTableWithJSONB](mock, nil, mockDialect{}).
+		WithTransformer(JSONBMarshaler("metadata"))
+
+	row := &testTableWithJSONB{
+		Metadata: map[string]any{"version": 1, "env": "prod"},
+	}
+
+	err := c.InsertOne(context.Background(), row)
+	if err != nil {
+		t.Fatalf("InsertOne with transformer error: %v", err)
+	}
+	if row.ID != 1 {
+		t.Errorf("expected ID 1, got %d", row.ID)
+	}
+}
+
+func TestCurdWithTransformerInsertBatch(t *testing.T) {
+	mock := &mockQuerier{execResult: &mockResult{rowsAffected: 2}}
+
+	c := New[testTableWithJSONB](mock, nil, mockDialect{}).
+		WithTransformer(JSONBMarshaler("metadata", "config"))
+
+	rows := []testTableWithJSONB{
+		{Metadata: map[string]any{"a": 1}},
+		{Metadata: map[string]any{"b": 2}, Config: map[string]any{"c": 3}},
+	}
+
+	err := c.InsertBatch(context.Background(), rows)
+	if err != nil {
+		t.Fatalf("InsertBatch with transformer error: %v", err)
+	}
+}
+
+func TestCurdWithTransformerPreservesOtherFields(t *testing.T) {
+	mock := &mockQuerier{
+		queryRow: &mockRow{record: []any{int64(10)}},
+	}
+
+	c := New[testTableWithJSONB](mock, nil, mockDialect{}).
+		WithTransformer(JSONBMarshaler("metadata"))
+
+	row := &testTableWithJSONB{
+		Metadata: map[string]any{"key": "value"},
+		Config:   map[string]any{"other": true}, // not transformed
+	}
+
+	err := c.InsertOne(context.Background(), row)
+	if err != nil {
+		t.Fatalf("InsertOne error: %v", err)
+	}
+	// Config should remain as map[string]any (not JSON string)
+	if _, ok := row.Config["other"]; !ok {
+		t.Error("Config should be preserved as map")
+	}
+}
+
+func TestCurdChainedWithTransformer(t *testing.T) {
+	mock := &mockQuerier{execResult: &mockResult{rowsAffected: 3}}
+
+	c := New[testTableWithJSONB](mock, nil, mockDialect{}).
+		WithTransformer(JSONBMarshaler("metadata")).
+		WithTransformer(JSONBMarshaler("config"))
+
+	// Both transformers should be active
+	if len(c.transforms) != 2 {
+		t.Errorf("expected 2 transformers, got %d", len(c.transforms))
+	}
+
+	rows := []testTableWithJSONB{
+		{Metadata: map[string]any{"a": 1}, Config: map[string]any{"x": 2}},
+	}
+	err := c.InsertBatch(context.Background(), rows)
+	if err != nil {
+		t.Fatalf("InsertBatch error: %v", err)
+	}
+}
+
+func TestCurdWithXMLTransformerInsertOne(t *testing.T) {
+	mock := &mockQuerier{
+		queryRow: &mockRow{record: []any{int64(5)}},
+	}
+
+	c := New[testTableWithXML](mock, nil, mockDialect{}).
+		WithTransformer(XMLMarshaler("document"))
+
+	type xmlDoc struct {
+		XMLName struct{} `xml:"report"`
+		Title   string   `xml:"title"`
+	}
+	row := &testTableWithXML{
+		Document: "placeholder",
+	}
+
+	err := c.InsertOne(context.Background(), row)
+	if err != nil {
+		t.Fatalf("InsertOne with XML transformer error: %v", err)
+	}
+	if row.ID != 5 {
+		t.Errorf("expected ID 5, got %d", row.ID)
+	}
+
+	// Also verify transformer behavior directly
+	tf := XMLMarshaler("document")
+	result := tf("document", xmlDoc{Title: "Hello"})
+	if str, ok := result.(string); !ok || str != `<report><title>Hello</title></report>` {
+		t.Errorf("XML transformer did not produce expected output: %v", result)
+	}
+}
+
+func TestRowValuesWithTransforms(t *testing.T) {
+	fm := defaultFieldMapper{}
+	row := testTableWithJSONB{
+		ID:       1,
+		Metadata: map[string]any{"key": "val"},
+		Config:   map[string]any{"debug": true},
+	}
+	v := reflect.ValueOf(row)
+
+	// Without transformer
+	_, vals := rowValues(v, fm)
+	// Metadata should be a map
+	if _, ok := vals[1].(map[string]any); !ok {
+		t.Error("Metadata should be map without transformer")
+	}
+
+	// With transformer
+	_, vals = rowValues(v, fm, JSONBMarshaler("metadata"))
+	// Metadata should now be a JSON string
+	if str, ok := vals[1].(string); !ok || str != `{"key":"val"}` {
+		t.Errorf("Metadata should be JSON string with transformer, got %v", vals[1])
+	}
+	// Config should still be map (not transformed)
+	if _, ok := vals[2].(map[string]any); !ok {
+		t.Error("Config should remain map (not in transformer list)")
+	}
+}
+
+func TestCurdWithQuerierPreservesTransforms(t *testing.T) {
+	c := New[testTableWithJSONB](&mockQuerier{}, nil, mockDialect{}).
+		WithTransformer(JSONBMarshaler("metadata"))
+
+	c2 := c.WithQuerier(&mockQuerier{})
+	if len(c2.transforms) != 1 {
+		t.Errorf("WithQuerier should preserve transforms, got %d", len(c2.transforms))
+	}
+}
