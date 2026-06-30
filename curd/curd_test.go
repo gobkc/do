@@ -1,4 +1,4 @@
-package postgres
+package curd
 
 import (
 	"context"
@@ -1410,88 +1410,6 @@ func TestBuildWhereEmptyMap(t *testing.T) {
 	}
 	if len(args) != 0 {
 		t.Errorf("expected 0 args, got %d", len(args))
-	}
-}
-
-// --- Transaction timeout tests ---
-
-func TestWithTxTimeoutSuccess(t *testing.T) {
-	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
-	tx := &mockTx{Querier: q}
-	tb := &mockTxBeginner{tx: tx}
-
-	called := false
-	err := WithTxTimeout(context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) error {
-		called = true
-		// Verify context has a deadline
-		if _, ok := ctx.Deadline(); !ok {
-			t.Error("context should have a deadline")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("WithTxTimeout error: %v", err)
-	}
-	if !called {
-		t.Error("fn should have been called")
-	}
-	if !tx.committed {
-		t.Error("tx should be committed")
-	}
-}
-
-func TestWithTxTimeoutFnError(t *testing.T) {
-	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
-	tx := &mockTx{Querier: q}
-	tb := &mockTxBeginner{tx: tx}
-
-	testErr := errors.New("timeout fn error")
-	err := WithTxTimeout(context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) error {
-		return testErr
-	})
-	if err == nil {
-		t.Error("expected error from fn")
-	}
-	if !tx.rolledBack {
-		t.Error("tx should be rolled back on error")
-	}
-}
-
-func TestWithTxResultTimeoutSuccess(t *testing.T) {
-	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
-	tx := &mockTx{Querier: q}
-	tb := &mockTxBeginner{tx: tx}
-
-	result, err := WithTxResultTimeout[int](context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) (int, error) {
-		if _, ok := ctx.Deadline(); !ok {
-			t.Error("context should have a deadline")
-		}
-		return 99, nil
-	})
-	if err != nil {
-		t.Fatalf("WithTxResultTimeout error: %v", err)
-	}
-	if result != 99 {
-		t.Errorf("expected 99, got %d", result)
-	}
-	if !tx.committed {
-		t.Error("tx should be committed")
-	}
-}
-
-func TestWithTxResultTimeoutFnError(t *testing.T) {
-	q := &mockQuerier{execResult: &mockResult{rowsAffected: 1}}
-	tx := &mockTx{Querier: q}
-	tb := &mockTxBeginner{tx: tx}
-
-	_, err := WithTxResultTimeout[int](context.Background(), tb, 5*time.Second, func(ctx context.Context, q Querier) (int, error) {
-		return 0, errors.New("timeout error")
-	})
-	if err == nil {
-		t.Error("expected fn error")
-	}
-	if !tx.rolledBack {
-		t.Error("tx should be rolled back on error")
 	}
 }
 

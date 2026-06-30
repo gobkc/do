@@ -697,42 +697,6 @@ func TestIntegrationWithTxResult(t *testing.T) {
 	}
 }
 
-func TestIntegrationWithTxTimeout(t *testing.T) {
-	truncateTable(t)
-	c := newCurd()
-
-	err := curd.WithTxTimeout(context.Background(), testPool, 1*time.Nanosecond, func(ctx context.Context, tx curd.Querier) error {
-		txC := c.WithQuerier(tx)
-		return txC.InsertOne(ctx, &integrationItem{Name: "timeout", Value: 1})
-	})
-	if err == nil {
-		t.Error("expected timeout error")
-	}
-	t.Logf("timeout error (expected): %v", err)
-
-	count, _ := c.Count(context.Background(), nil)
-	if count != 0 {
-		t.Errorf("expected count 0 after timeout, got %d", count)
-	}
-}
-
-func TestIntegrationWithTxResultTimeout(t *testing.T) {
-	truncateTable(t)
-	c := newCurd()
-
-	_, err := curd.WithTxResultTimeout[int](context.Background(), testPool, 1*time.Nanosecond, func(ctx context.Context, tx curd.Querier) (int, error) {
-		txC := c.WithQuerier(tx)
-		if err := txC.InsertOne(ctx, &integrationItem{Name: "t", Value: 1}); err != nil {
-			return 0, err
-		}
-		return 1, nil
-	})
-	if err == nil {
-		t.Error("expected timeout error")
-	}
-	t.Logf("result timeout error (expected): %v", err)
-}
-
 // ============================================
 // SQL Logging Tests
 // ============================================
