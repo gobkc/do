@@ -126,6 +126,23 @@ func (p *Pool) Begin(ctx context.Context) (curd.Tx, error) {
 	return &txAdapter{Tx: tx}, nil
 }
 
+// BeginTx starts a transaction with custom options (isolation level, access mode, etc.).
+// Use this when you need SERIALIZABLE isolation, READ ONLY mode, or deferrable constraints.
+//
+// Usage:
+//
+//	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+//	if err != nil { ... }
+//	defer tx.Rollback(ctx)
+//	txC := c.WithQuerier(tx)
+func (p *Pool) BeginTx(ctx context.Context, opts pgx.TxOptions) (curd.Tx, error) {
+	tx, err := p.pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &txAdapter{Tx: tx}, nil
+}
+
 func (p *Pool) Close() {
 	p.pool.Close()
 }

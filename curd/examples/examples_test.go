@@ -173,7 +173,7 @@ func TestExampleBasicCRUD(t *testing.T) {
 			},
 		}
 		c := curd.New[User](mock, nil, mockDialect{})
-		user, err := c.FindOne(ctx, map[string]any{"name": "alice"})
+		user, err := c.FindOne(ctx, curd.Eq("name", "alice"))
 		if err != nil {
 			t.Fatalf("FindOne failed: %v", err)
 		}
@@ -242,7 +242,7 @@ func TestExampleBasicCRUD(t *testing.T) {
 	t.Run("UpdateWhere", func(t *testing.T) {
 		mock := &mockQuerier{execResult: &mockResult{rowsAffected: 5}}
 		c := curd.New[User](mock, nil, mockDialect{})
-		err := c.UpdateWhere(ctx, map[string]any{"email": ""}, map[string]any{"email": "unknown@example.com"})
+		err := c.UpdateWhere(ctx, curd.Eq("email", ""), map[string]any{"email": "unknown@example.com"})
 		if err != nil {
 			t.Fatalf("UpdateWhere failed: %v", err)
 		}
@@ -275,7 +275,7 @@ func TestExampleBasicCRUD(t *testing.T) {
 	t.Run("DeleteWhere", func(t *testing.T) {
 		mock := &mockQuerier{execResult: &mockResult{rowsAffected: 3}}
 		c := curd.New[User](mock, nil, mockDialect{})
-		err := c.DeleteWhere(ctx, map[string]any{"email": ""})
+		err := c.DeleteWhere(ctx, curd.Eq("email", ""))
 		if err != nil {
 			t.Fatalf("DeleteWhere failed: %v", err)
 		}
@@ -301,7 +301,7 @@ func TestExampleBasicCRUD(t *testing.T) {
 			queryRow: &mockRow{record: []any{true}},
 		}
 		c := curd.New[User](mock, nil, mockDialect{})
-		exists, err := c.Exists(ctx, map[string]any{"name": "alice"})
+		exists, err := c.Exists(ctx, curd.Eq("name", "alice"))
 		if err != nil {
 			t.Fatalf("Exists failed: %v", err)
 		}

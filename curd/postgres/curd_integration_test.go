@@ -329,7 +329,7 @@ func TestIntegrationFindAllWithWhere(t *testing.T) {
 	}
 
 	results, err := c.FindAll(context.Background(),
-		map[string]any{"value": 20}, "id DESC", 0, 0)
+		curd.Eq("value", 20), "id DESC", 0, 0)
 	if err != nil {
 		t.Fatalf("FindAll with where: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestIntegrationFindOne(t *testing.T) {
 
 	c.InsertOne(context.Background(), &integrationItem{Name: "findone", Value: 99})
 
-	result, err := c.FindOne(context.Background(), map[string]any{"name": "findone"})
+	result, err := c.FindOne(context.Background(), curd.Eq("name", "findone"))
 	if err != nil {
 		t.Fatalf("FindOne: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestIntegrationFindOne(t *testing.T) {
 		t.Errorf("expected value 99, got %d", result.Value)
 	}
 
-	_, err = c.FindOne(context.Background(), map[string]any{"name": "nonexistent"})
+	_, err = c.FindOne(context.Background(), curd.Eq("name", "nonexistent"))
 	if err == nil {
 		t.Error("expected error for not found")
 	}
@@ -416,7 +416,7 @@ func TestIntegrationCount(t *testing.T) {
 		t.Errorf("expected count 7, got %d", count)
 	}
 
-	count, err = c.Count(context.Background(), map[string]any{"value": 5})
+	count, err = c.Count(context.Background(), curd.Eq("value", 5))
 	if err != nil {
 		t.Fatalf("Count with where: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestIntegrationExists(t *testing.T) {
 
 	c.InsertOne(context.Background(), &integrationItem{Name: "ex", Value: 1})
 
-	exists, err := c.Exists(context.Background(), map[string]any{"name": "ex"})
+	exists, err := c.Exists(context.Background(), curd.Eq("name", "ex"))
 	if err != nil {
 		t.Fatalf("Exists: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestIntegrationExists(t *testing.T) {
 		t.Error("expected exists=true")
 	}
 
-	exists, err = c.Exists(context.Background(), map[string]any{"name": "no"})
+	exists, err = c.Exists(context.Background(), curd.Eq("name", "no"))
 	if err != nil {
 		t.Fatalf("Exists: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestIntegrationUpdateWhere(t *testing.T) {
 	}
 
 	err := c.UpdateWhere(context.Background(),
-		map[string]any{"name": "batch-update"},
+		curd.Eq("name", "batch-update"),
 		map[string]any{"value": 999},
 	)
 	if err != nil {
@@ -566,7 +566,7 @@ func TestIntegrationDeleteWhere(t *testing.T) {
 		})
 	}
 
-	err := c.DeleteWhere(context.Background(), map[string]any{"name": "del-where"})
+	err := c.DeleteWhere(context.Background(), curd.Eq("name", "del-where"))
 	if err != nil {
 		t.Fatalf("DeleteWhere: %v", err)
 	}
@@ -868,7 +868,7 @@ func TestIntegrationSequentialInsertAndQuery(t *testing.T) {
 	}
 
 	filtered, err := c.FindAll(context.Background(),
-		map[string]any{"value": 50}, "", 0, 0)
+		curd.Eq("value", 50), "", 0, 0)
 	if err != nil {
 		t.Fatalf("FindAll filtered: %v", err)
 	}
@@ -970,7 +970,7 @@ func TestIntegrationSoftDeleteFiltering(t *testing.T) {
 		t.Errorf("expected count 2, got %d", count)
 	}
 
-	exists, err := c.Exists(context.Background(), map[string]any{"name": "sf-2"})
+	exists, err := c.Exists(context.Background(), curd.Eq("name", "sf-2"))
 	if err != nil {
 		t.Fatalf("Exists: %v", err)
 	}

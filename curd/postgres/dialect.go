@@ -1,9 +1,10 @@
 package postgres
 
-import "fmt"
+import "strconv"
 
+// Dialect implements curd.Dialect for PostgreSQL ($1, $2, ...).
 type Dialect struct{}
 
 func (Dialect) Placeholder(n int) string {
-	return fmt.Sprintf("$%d", n)
+	return "$" + strconv.Itoa(n)
 }

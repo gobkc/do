@@ -64,6 +64,9 @@ func toSnakeCase(s string) string {
 }
 
 func columnsFromType(t reflect.Type, fm FieldMapper) []string {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
 	var cols []string
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -77,6 +80,12 @@ func columnsFromType(t reflect.Type, fm FieldMapper) []string {
 }
 
 func rowValues(v reflect.Value, fm FieldMapper, transforms ...FieldTransformer) ([]string, []any) {
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil, nil
+		}
+		v = v.Elem()
+	}
 	t := v.Type()
 	var cols []string
 	var vals []any
@@ -102,6 +111,12 @@ func rowValues(v reflect.Value, fm FieldMapper, transforms ...FieldTransformer) 
 }
 
 func scanTargets(v reflect.Value, fm FieldMapper) (targets []any, fields []reflect.Value) {
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil, nil
+		}
+		v = v.Elem()
+	}
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
