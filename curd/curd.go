@@ -168,6 +168,19 @@ func formatArg(arg any) string {
 
 // --- Internal helpers ---
 
+// tableName safely extracts the table name from type parameter T.
+// It handles both value types (e.g. VPaymentOrder) and pointer types
+// (e.g. *VPaymentOrder). When T is a pointer, var t T would be nil and
+// calling a value-receiver TableName() on a nil pointer would panic.
+func tableName[T Table]() string {
+	var zero T
+	rv := reflect.ValueOf(&zero).Elem()
+	if rv.Kind() == reflect.Ptr {
+		return reflect.New(rv.Type().Elem()).Interface().(Table).TableName()
+	}
+	return zero.TableName()
+}
+
 // buildWhereClause evaluates a Predicate and combines it with the soft-delete
 // filter (deleted_date IS NULL) when the entity has a DeletedDate field.
 // Returns the complete " WHERE ..." clause and collected arguments.
@@ -196,12 +209,12 @@ func (c *Curd[T]) buildWhereClause(where Predicate) (clause string, args []any) 
 // Pass nil for where to include all rows. orderBy can be empty.
 func (c *Curd[T]) FindAll(ctx context.Context, where Predicate, orderBy string, limit, offset int) ([]T, error) {
 	var t T
-	tableName := t.TableName()
+	name := tableName[T]()
 	cols := columnsFromType(reflect.TypeOf(t), c.fm)
 
 	whereClause, args := c.buildWhereClause(where)
 
-	query := fmt.Sprintf("SELECT %s FROM %s%s", strings.Join(cols, ","), tableName, whereClause)
+	query := fmt.Sprintf("SELECT %s FROM %s%s", strings.Join(cols, ","), name, whereClause)
 	if orderBy != "" {
 		query += " ORDER BY " + orderBy
 	}
@@ -219,7 +232,7 @@ func (c *Curd[T]) FindAll(ctx context.Context, where Predicate, orderBy string, 
 	c.logSQL(ctx, query, args...)
 	rows, err := c.q.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("findAll %s: %w", tableName, err)
+		return nil, fmt.Errorf("findAll %s: %w", name, err)
 	}
 	defer rows.Close()
 	return scanAllWithMapper[T](rows, c.fm)
@@ -259,14 +272,14 @@ func (c *Curd[T]) Find(ctx context.Context, opts ...FindOption) ([]T, error) {
 	cfg := resolveFindConfig(opts)
 
 	var t T
-	tableName := t.TableName()
+	name := tableName[T]()
 
 	cols := cfg.columns
 	if len(cols) == 0 {
 		cols = columnsFromType(reflect.TypeOf(t), c.fm)
 	}
 
-	fromClause := tableName
+	fromClause := name
 	for _, j := range cfg.joins {
 		fromClause += fmt.Sprintf(" %s JOIN %s ON %s", j.Type, j.Table, j.On)
 	}
@@ -291,7 +304,7 @@ func (c *Curd[T]) Find(ctx context.Context, opts ...FindOption) ([]T, error) {
 	c.logSQL(ctx, query, args...)
 	rows, err := c.q.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("find %s: %w", tableName, err)
+		return nil, fmt.Errorf("find %s: %w", name, err)
 	}
 	defer rows.Close()
 	return scanAllWithMapper[T](rows, c.fm)
@@ -309,10 +322,9 @@ func (c *Curd[T]) FindPaginated(ctx context.Context, opts ...FindOption) (*Pagin
 	countCfg.orderBy = ""
 	countCfg.columns = []string{"1"}
 
-	var t T
-	tableName := t.TableName()
+	name := tableName[T]()
 
-	fromClause := tableName
+	fromClause := name
 	for _, j := range cfg.joins {
 		fromClause += fmt.Sprintf(" %s JOIN %s ON %s", j.Type, j.Table, j.On)
 	}
@@ -324,7 +336,7 @@ func (c *Curd[T]) FindPaginated(ctx context.Context, opts ...FindOption) (*Pagin
 	var total int64
 	c.logSQL(ctx, countQuery, whereArgs...)
 	if err := c.q.QueryRow(ctx, countQuery, whereArgs...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("findPaginated count %s: %w", tableName, err)
+		return nil, fmt.Errorf("findPaginated count %s: %w", name, err)
 	}
 
 	list, err := c.Find(ctx, opts...)
@@ -438,8 +450,7 @@ func (c *Curd[T]) InsertBatchPtr(ctx context.Context, rows []*T) error {
 
 // UpdateByID updates a row identified by its primary key "id".
 func (c *Curd[T]) UpdateByID(ctx context.Context, id any, updates map[string]any) error {
-	var t T
-	tableName := t.TableName()
+	tableName := tableName[T]()
 	setClauses := make([]string, 0, len(updates))
 	args := make([]any, 1, 1+len(updates))
 	args[0] = id
@@ -460,8 +471,7 @@ func (c *Curd[T]) UpdateByID(ctx context.Context, id any, updates map[string]any
 
 // UpdateWhere updates rows matching the predicate.
 func (c *Curd[T]) UpdateWhere(ctx context.Context, where Predicate, updates map[string]any) error {
-	var t T
-	tableName := t.TableName()
+	tableName := tableName[T]()
 
 	// Build SET clause (starts at $1)
 	setClauses := make([]string, 0, len(updates))
@@ -497,8 +507,7 @@ func (c *Curd[T]) UpdateWhere(ctx context.Context, where Predicate, updates map[
 // DeleteByID deletes a row by its primary key. If hard is false, performs a
 // soft delete by setting deleted_date. If hard is true, performs a hard DELETE.
 func (c *Curd[T]) DeleteByID(ctx context.Context, id any, hard bool) error {
-	var t T
-	tableName := t.TableName()
+	tableName := tableName[T]()
 	if hard {
 		query := fmt.Sprintf("DELETE FROM %s WHERE id = %s", tableName, c.dialect.Placeholder(1))
 		c.logSQL(ctx, query, id)
@@ -514,8 +523,7 @@ func (c *Curd[T]) DeleteByID(ctx context.Context, id any, hard bool) error {
 
 // DeleteWhere hard-deletes rows matching the predicate.
 func (c *Curd[T]) DeleteWhere(ctx context.Context, where Predicate) error {
-	var t T
-	tableName := t.TableName()
+	tableName := tableName[T]()
 	whereClause, args := buildPredicate(where, c.dialect)
 	whereSQL := ""
 	if whereClause != "" {
@@ -532,8 +540,7 @@ func (c *Curd[T]) DeleteWhere(ctx context.Context, where Predicate) error {
 // Count returns the number of rows matching the predicate.
 // Soft-deleted rows (deleted_date IS NOT NULL) are automatically excluded.
 func (c *Curd[T]) Count(ctx context.Context, where Predicate) (int64, error) {
-	var t T
-	tableName := t.TableName()
+	tableName := tableName[T]()
 	whereClause, args := c.buildWhereClause(where)
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s%s", tableName, whereClause)
 	var count int64
@@ -545,8 +552,7 @@ func (c *Curd[T]) Count(ctx context.Context, where Predicate) (int64, error) {
 // Exists returns true if at least one row matches the predicate.
 // Soft-deleted rows are automatically excluded.
 func (c *Curd[T]) Exists(ctx context.Context, where Predicate) (bool, error) {
-	var t T
-	tableName := t.TableName()
+	tableName := tableName[T]()
 	whereClause, args := c.buildWhereClause(where)
 	whereSQL := ""
 	if whereClause != "" {
@@ -650,8 +656,7 @@ func structToUpdates(v reflect.Value, fm FieldMapper, transforms []FieldTransfor
 //
 //	names, err := c.Pluck(ctx, "name", curd.Eq("status", "active"))
 func (c *Curd[T]) Pluck(ctx context.Context, column string, where Predicate) ([]any, error) {
-	var t T
-	tableName := t.TableName()
+	tableName := tableName[T]()
 	whereClause, args := c.buildWhereClause(where)
 	query := fmt.Sprintf("SELECT %s FROM %s%s", column, tableName, whereClause)
 	c.logSQL(ctx, query, args...)
