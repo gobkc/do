@@ -82,18 +82,30 @@ func (c *Curd[T]) WithTransformer(t FieldTransformer) *Curd[T] {
 
 // --- Logging ---
 
-func (c *Curd[T]) logSQL(ctx context.Context, query string, args ...any) {
+func (c *Curd[T]) logSQL(ctx context.Context, query string, args ...any) func() {
 	if !c.sqlLog {
-		return
+		return func() {}
 	}
-	slog.InfoContext(ctx, "curd sql", slog.String("sql", formatSQL(query, args...)))
+	start := time.Now()
+	return func() {
+		slog.InfoContext(ctx, "curd sql",
+			slog.String("sql", formatSQL(query, args...)),
+			slog.Duration("cost", time.Since(start)),
+		)
+	}
 }
 
-func logSQLGlobal(ctx context.Context, query string, args ...any) {
+func logSQLGlobal(ctx context.Context, query string, args ...any) func() {
 	if !globalSQLLog {
-		return
+		return func() {}
 	}
-	slog.InfoContext(ctx, "curd sql", slog.String("sql", formatSQL(query, args...)))
+	start := time.Now()
+	return func() {
+		slog.InfoContext(ctx, "curd sql",
+			slog.String("sql", formatSQL(query, args...)),
+			slog.Duration("cost", time.Since(start)),
+		)
+	}
 }
 
 // formatSQL interpolates parameter values into a SQL query string,
@@ -229,7 +241,7 @@ func (c *Curd[T]) FindAll(ctx context.Context, where Predicate, orderBy string, 
 		args = append(args, offset)
 	}
 
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	rows, err := c.q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("findAll %s: %w", name, err)
@@ -301,7 +313,7 @@ func (c *Curd[T]) Find(ctx context.Context, opts ...FindOption) ([]T, error) {
 		args = append(args, cfg.offset)
 	}
 
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	rows, err := c.q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("find %s: %w", name, err)
@@ -334,7 +346,7 @@ func (c *Curd[T]) FindPaginated(ctx context.Context, opts ...FindOption) (*Pagin
 	// COUNT uses a subquery to handle JOINs correctly
 	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s%s) AS _curd_count", fromClause, whereClause)
 	var total int64
-	c.logSQL(ctx, countQuery, whereArgs...)
+	defer c.logSQL(ctx, countQuery, whereArgs...)()
 	if err := c.q.QueryRow(ctx, countQuery, whereArgs...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("findPaginated count %s: %w", name, err)
 	}
@@ -377,7 +389,7 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 		tableName, strings.Join(cols, ","), strings.Join(placeholders, ","), returningClause)
 
 	if returningClause != "" {
-		c.logSQL(ctx, query, args...)
+		defer c.logSQL(ctx, query, args...)()
 		var id int64
 		if err := c.q.QueryRow(ctx, query, args...).Scan(&id); err != nil {
 			return fmt.Errorf("insert %s: %w", tableName, err)
@@ -385,7 +397,7 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 		setField(v, "ID", id)
 		return nil
 	}
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("insert %s: %w", tableName, err)
@@ -426,7 +438,7 @@ func (c *Curd[T]) InsertBatch(ctx context.Context, rows []T) error {
 	}
 
 	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", tableName, strings.Join(cols, ","), strings.Join(placeholders, ","))
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("insert batch %s: %w", tableName, err)
@@ -461,7 +473,7 @@ func (c *Curd[T]) UpdateByID(ctx context.Context, id any, updates map[string]any
 		argIdx++
 	}
 	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = %s", tableName, strings.Join(setClauses, ","), c.dialect.Placeholder(1))
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update %s: %w", tableName, err)
@@ -494,7 +506,7 @@ func (c *Curd[T]) UpdateWhere(ctx context.Context, where Predicate, updates map[
 	}
 
 	query := fmt.Sprintf("UPDATE %s SET %s%s", tableName, strings.Join(setClauses, ","), whereSQL)
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update where %s: %w", tableName, err)
@@ -510,13 +522,13 @@ func (c *Curd[T]) DeleteByID(ctx context.Context, id any, hard bool) error {
 	tableName := tableName[T]()
 	if hard {
 		query := fmt.Sprintf("DELETE FROM %s WHERE id = %s", tableName, c.dialect.Placeholder(1))
-		c.logSQL(ctx, query, id)
+		defer c.logSQL(ctx, query, id)()
 		_, err := c.q.Exec(ctx, query, id)
 		return err
 	}
 	query := fmt.Sprintf("UPDATE %s SET deleted_date = %s WHERE id = %s", tableName, c.dialect.Placeholder(1), c.dialect.Placeholder(2))
 	args := []any{time.Now(), id}
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	return err
 }
@@ -530,7 +542,7 @@ func (c *Curd[T]) DeleteWhere(ctx context.Context, where Predicate) error {
 		whereSQL = " WHERE " + whereClause
 	}
 	query := fmt.Sprintf("DELETE FROM %s%s", tableName, whereSQL)
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	return err
 }
@@ -544,7 +556,7 @@ func (c *Curd[T]) Count(ctx context.Context, where Predicate) (int64, error) {
 	whereClause, args := c.buildWhereClause(where)
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s%s", tableName, whereClause)
 	var count int64
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	err := c.q.QueryRow(ctx, query, args...).Scan(&count)
 	return count, err
 }
@@ -560,7 +572,7 @@ func (c *Curd[T]) Exists(ctx context.Context, where Predicate) (bool, error) {
 	}
 	var exists bool
 	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s%s)", tableName, whereSQL)
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	err := c.q.QueryRow(ctx, query, args...).Scan(&exists)
 	return exists, err
 }
@@ -659,7 +671,7 @@ func (c *Curd[T]) Pluck(ctx context.Context, column string, where Predicate) ([]
 	tableName := tableName[T]()
 	whereClause, args := c.buildWhereClause(where)
 	query := fmt.Sprintf("SELECT %s FROM %s%s", column, tableName, whereClause)
-	c.logSQL(ctx, query, args...)
+	defer c.logSQL(ctx, query, args...)()
 	rows, err := c.q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pluck %s: %w", tableName, err)
@@ -821,7 +833,7 @@ func renumberPlaceholders(sql string, d Dialect, offset int) string {
 // QueryRaw executes a raw SQL query and scans results into []T.
 // Column mapping uses Go field names directly (no json/gorm tag processing).
 func QueryRaw[T any](ctx context.Context, q Querier, query string, args ...any) ([]T, error) {
-	logSQLGlobal(ctx, query, args...)
+	defer logSQLGlobal(ctx, query, args...)()
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query raw: %w", err)
@@ -833,7 +845,7 @@ func QueryRaw[T any](ctx context.Context, q Querier, query string, args ...any) 
 // QueryRowRaw executes a raw SQL query and scans a single row into T.
 func QueryRowRaw[T any](ctx context.Context, q Querier, query string, args ...any) (T, error) {
 	var zero T
-	logSQLGlobal(ctx, query, args...)
+	defer logSQLGlobal(ctx, query, args...)()
 	row := q.QueryRow(ctx, query, args...)
 	result, err := scanRowWithMapper[T](row, rawFieldMapper{})
 	if err != nil {
@@ -844,7 +856,7 @@ func QueryRowRaw[T any](ctx context.Context, q Querier, query string, args ...an
 
 // ExecRaw executes a raw SQL statement and returns the number of rows affected.
 func ExecRaw(ctx context.Context, q Querier, sql string, args ...any) (int64, error) {
-	logSQLGlobal(ctx, sql, args...)
+	defer logSQLGlobal(ctx, sql, args...)()
 	tag, err := q.Exec(ctx, sql, args...)
 	if err != nil {
 		return 0, fmt.Errorf("exec raw: %w", err)
