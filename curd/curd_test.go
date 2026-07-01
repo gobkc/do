@@ -688,7 +688,7 @@ func TestFieldMapperGormDash(t *testing.T) {
 	}
 }
 
-func TestFieldMapperJsonPriorityOverGorm(t *testing.T) {
+func TestFieldMapperGormPriorityOverJson(t *testing.T) {
 	fm := defaultFieldMapper{}
 	type s struct {
 		Field string `json:"json_name" gorm:"column:gorm_name"`
@@ -696,8 +696,8 @@ func TestFieldMapperJsonPriorityOverGorm(t *testing.T) {
 	tp := reflect.TypeOf(s{})
 
 	f, _ := tp.FieldByName("Field")
-	if got := fm.ColumnName(f); got != "json_name" {
-		t.Errorf("json tag should take priority over gorm, got %q", got)
+	if got := fm.ColumnName(f); got != "gorm_name" {
+		t.Errorf("gorm column tag should take priority over json tag, got %q", got)
 	}
 }
 

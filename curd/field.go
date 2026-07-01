@@ -12,19 +12,7 @@ type FieldMapper interface {
 type defaultFieldMapper struct{}
 
 func (defaultFieldMapper) ColumnName(f reflect.StructField) string {
-	if tag := f.Tag.Get("json"); tag != "" {
-		if tag == "-" {
-			return ""
-		}
-		if idx := strings.IndexByte(tag, ','); idx >= 0 {
-			if name := tag[:idx]; name != "" {
-				return name
-			}
-		} else {
-			return tag
-		}
-	}
-
+	// GORM column tag takes highest priority — it is the explicit DB column name.
 	if tag := f.Tag.Get("gorm"); tag != "" {
 		for _, part := range strings.Split(tag, ";") {
 			part = strings.TrimSpace(part)
@@ -34,6 +22,23 @@ func (defaultFieldMapper) ColumnName(f reflect.StructField) string {
 			if after, ok := strings.CutPrefix(part, "column:"); ok {
 				return strings.TrimSpace(after)
 			}
+		}
+	}
+
+	// JSON tag is used as column name, converted to snake_case so that
+	// camelCase JSON tags (e.g. "companyNameAr") map to valid PostgreSQL
+	// column names (e.g. "company_name_ar") instead of being folded to
+	// lowercase (e.g. "companynamear").
+	if tag := f.Tag.Get("json"); tag != "" {
+		if tag == "-" {
+			return ""
+		}
+		if idx := strings.IndexByte(tag, ','); idx >= 0 {
+			if name := tag[:idx]; name != "" {
+				return toSnakeCase(name)
+			}
+		} else {
+			return toSnakeCase(tag)
 		}
 	}
 
