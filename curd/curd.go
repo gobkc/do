@@ -2,8 +2,10 @@ package curd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"reflect"
 	"strings"
 	"time"
@@ -880,6 +882,65 @@ func (rawFieldMapper) ColumnName(f reflect.StructField) string {
 
 // --- Scan utilities ---
 
+// numericString converts a pgtype.Numeric-like struct to its decimal string
+// representation. pgx v5 returns pgtype.Numeric (struct with Int *big.Int and
+// Exp int32 fields) for PostgreSQL NUMERIC columns when scanning into *any via
+// binary protocol. This function uses reflection to detect the struct without
+// importing pgtype, so that types like decimal.Decimal (which implement
+// sql.Scanner but don't recognise pgtype.Numeric) can still read NUMERIC values.
+func numericString(src reflect.Value) (string, bool) {
+	if src.Kind() != reflect.Struct {
+		return "", false
+	}
+	intField := src.FieldByName("Int")
+	expField := src.FieldByName("Exp")
+	if !intField.IsValid() || !expField.IsValid() {
+		return "", false
+	}
+	// Int must be *big.Int
+	if intField.Type() != reflect.TypeOf((*big.Int)(nil)) {
+		return "", false
+	}
+	// Exp must be int32
+	if expField.Kind() != reflect.Int32 {
+		return "", false
+	}
+	// Check Valid — skip NULL (shouldn't reach here for NULL, but be safe)
+	if v := src.FieldByName("Valid"); v.IsValid() && v.Kind() == reflect.Bool && !v.Bool() {
+		return "", false
+	}
+	// Check NaN
+	if v := src.FieldByName("NaN"); v.IsValid() && v.Kind() == reflect.Bool && v.Bool() {
+		return "", false
+	}
+	// Check InfinityModifier (0 = Finite, non-zero = Infinity/-Infinity)
+	if v := src.FieldByName("InfinityModifier"); v.IsValid() && v.Int() != 0 {
+		return "", false
+	}
+
+	bi := intField.Interface().(*big.Int)
+	if bi == nil {
+		return "", false
+	}
+	exp := int(expField.Int())
+	s := bi.String()
+
+	if exp >= 0 {
+		// Integer (or with trailing zeros), e.g. Exp=2 => "5000" + "00" = "500000"
+		return s + strings.Repeat("0", exp), true
+	}
+
+	// Negative exponent: insert decimal point, e.g. Exp=-2 => "50.00"
+	absExp := -exp
+	if absExp >= len(s) {
+		// Need leading zeros, e.g. 5 with Exp=-3 => "0.005"
+		s = strings.Repeat("0", absExp-len(s)) + s
+		return "0." + s, true
+	}
+	dotPos := len(s) - absExp
+	return s[:dotPos] + "." + s[dotPos:], true
+}
+
 func nullSafeCopy(fields []reflect.Value, targets []any) {
 	for i, f := range fields {
 		if !f.CanSet() {
@@ -930,6 +991,41 @@ func nullSafeCopy(fields []reflect.Value, targets []any) {
 				f.Set(reflect.Zero(f.Type()))
 			}
 		default:
+			// Support types implementing sql.Scanner (sql.NullString,
+			// sql.NullTime, sql.NullInt64, sql.NullFloat64, sql.NullBool,
+			// custom Jsonb[T], decimal.Decimal, etc.).
+			if f.CanAddr() {
+				if scanner, ok := f.Addr().Interface().(sql.Scanner); ok {
+					err := scanner.Scan(*anyPtr)
+					if err != nil {
+						// pgx v5 binary protocol returns pgtype.Numeric
+						// for PostgreSQL NUMERIC columns. Types like
+						// decimal.Decimal don't recognise that struct,
+						// so convert it to a plain decimal string and retry.
+						if s, ok2 := numericString(src); ok2 {
+							err = scanner.Scan(s)
+						}
+					}
+					if err != nil {
+						f.Set(reflect.Zero(f.Type()))
+					}
+					continue
+				}
+			}
+
+			// Support pointer-to-value for nullable columns.
+			// e.g. time.Time source → *time.Time target,
+			//      string source    → *string target, etc.
+			if f.Kind() == reflect.Ptr {
+				elemType := f.Type().Elem()
+				if src.Type().AssignableTo(elemType) {
+					ptr := reflect.New(elemType)
+					ptr.Elem().Set(src)
+					f.Set(ptr)
+					continue
+				}
+			}
+
 			f.Set(reflect.Zero(f.Type()))
 		}
 	}
