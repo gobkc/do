@@ -88,7 +88,7 @@ func (c *Curd[T]) logSQL(ctx context.Context, query string, args ...any) func() 
 	if !c.sqlLog {
 		return func() {}
 	}
-	start := time.Now()
+	start := time.Now().UTC()
 	return func() {
 		slog.InfoContext(ctx, "curd sql",
 			slog.String("sql", formatSQL(query, args...)),
@@ -101,7 +101,7 @@ func logSQLGlobal(ctx context.Context, query string, args ...any) func() {
 	if !globalSQLLog {
 		return func() {}
 	}
-	start := time.Now()
+	start := time.Now().UTC()
 	return func() {
 		slog.InfoContext(ctx, "curd sql",
 			slog.String("sql", formatSQL(query, args...)),
@@ -535,7 +535,7 @@ func (c *Curd[T]) DeleteByID(ctx context.Context, id any, hard bool) error {
 		return err
 	}
 	query := fmt.Sprintf("UPDATE %s SET deleted_date = %s WHERE id = %s", tableName, c.dialect.Placeholder(1), c.dialect.Placeholder(2))
-	args := []any{time.Now(), id}
+	args := []any{time.Now().UTC(), id}
 	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	return err
@@ -1155,7 +1155,7 @@ func setNow(v reflect.Value, name string) {
 	if f.IsValid() && f.CanSet() {
 		switch f.Interface().(type) {
 		case time.Time:
-			f.Set(reflect.ValueOf(time.Now()))
+			f.Set(reflect.ValueOf(time.Now().UTC()))
 		}
 	}
 }
