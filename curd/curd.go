@@ -383,7 +383,13 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 	}
 
 	returningClause := ""
-	if hasField(t, "ID") || hasField(t, "Id") {
+	idFieldName := ""
+	if hasField(t, "ID") {
+		idFieldName = "ID"
+	} else if hasField(t, "Id") {
+		idFieldName = "Id"
+	}
+	if idFieldName != "" {
 		returningClause = " RETURNING id"
 	}
 
@@ -396,7 +402,7 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 		if err := c.q.QueryRow(ctx, query, args...).Scan(&id); err != nil {
 			return fmt.Errorf("insert %s: %w", tableName, err)
 		}
-		setField(v, "ID", id)
+		setField(v, idFieldName, id)
 		return nil
 	}
 	defer c.logSQL(ctx, query, args...)()
@@ -628,6 +634,9 @@ func (c *Curd[T]) Save(ctx context.Context, row *T) error {
 	v := reflect.ValueOf(row).Elem()
 
 	idField := v.FieldByName("ID")
+	if !idField.IsValid() {
+		idField = v.FieldByName("Id")
+	}
 	if !idField.IsValid() || idField.IsZero() {
 		return c.InsertOne(ctx, row)
 	}
