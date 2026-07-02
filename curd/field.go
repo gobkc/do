@@ -108,7 +108,7 @@ func rowValues(v reflect.Value, fm FieldMapper, transforms ...FieldTransformer) 
 		}
 		// Skip auto-generated ID field when its value is zero,
 		// so the database can assign a sequence value.
-		if f.Name == "ID" && v.Field(i).IsZero() {
+		if strings.EqualFold(f.Name, "id") && v.Field(i).IsZero() {
 			continue
 		}
 		cols = append(cols, name)

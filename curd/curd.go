@@ -383,7 +383,7 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 	}
 
 	returningClause := ""
-	if hasField(t, "ID") {
+	if hasField(t, "ID") || hasField(t, "Id") {
 		returningClause = " RETURNING id"
 	}
 
