@@ -79,6 +79,11 @@ func NewPool(dsn string, opts ...PoolOption) (*Pool, error) {
 	poolCfg.MaxConnLifetime = cfg.connMaxLifetime
 	poolCfg.MaxConnIdleTime = cfg.connMaxIdleTime
 
+	poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET timezone = 'UTC'")
+		return err
+	}
+
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
