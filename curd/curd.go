@@ -646,6 +646,9 @@ func structToUpdates(v reflect.Value, fm FieldMapper, transforms []FieldTransfor
 		v = v.Elem()
 	}
 	t := v.Type()
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
 	updates := make(map[string]any)
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)

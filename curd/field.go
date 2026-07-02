@@ -72,6 +72,9 @@ func columnsFromType(t reflect.Type, fm FieldMapper) []string {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
 	var cols []string
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
@@ -92,6 +95,9 @@ func rowValues(v reflect.Value, fm FieldMapper, transforms ...FieldTransformer) 
 		v = v.Elem()
 	}
 	t := v.Type()
+	if t.Kind() != reflect.Struct {
+		return nil, nil
+	}
 	var cols []string
 	var vals []any
 	for i := 0; i < t.NumField(); i++ {
@@ -121,6 +127,16 @@ func scanTargets(v reflect.Value, fm FieldMapper) (targets []any, fields []refle
 			return nil, nil
 		}
 		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		// Scalar type (int64, string, float64, etc.): scan directly into the value.
+		if !v.CanAddr() {
+			return nil, nil
+		}
+		var dest any
+		targets = append(targets, &dest)
+		fields = append(fields, v)
+		return
 	}
 	t := v.Type()
 	for i := 0; i < v.NumField(); i++ {
