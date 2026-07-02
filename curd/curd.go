@@ -953,6 +953,28 @@ func numericString(src reflect.Value) (string, bool) {
 	return s[:dotPos] + "." + s[dotPos:], true
 }
 
+// jsonbText detects pgx v5 binary JSONB format (version byte 1 + JSON text)
+// and returns the decoded JSON string. pgx v5, when using the binary protocol,
+// wraps JSONB values with a 1-byte version header per the PostgreSQL binary
+// format. Types like Jsonb[T] that implement sql.Scanner expect plain JSON
+// text — the version byte causes json.Unmarshal to fail. Stripping it here
+// allows sql.Scanner implementations to work transparently without requiring
+// ::text casts in every query.
+func jsonbText(src reflect.Value) (string, bool) {
+	if src.Kind() != reflect.Slice {
+		return "", false
+	}
+	// Only handle []byte (not []int, []string, etc.)
+	if src.Type().Elem().Kind() != reflect.Uint8 {
+		return "", false
+	}
+	b := src.Bytes()
+	if len(b) == 0 || b[0] != 1 {
+		return "", false
+	}
+	return string(b[1:]), true
+}
+
 func nullSafeCopy(fields []reflect.Value, targets []any) {
 	for i, f := range fields {
 		if !f.CanSet() {
@@ -1016,6 +1038,14 @@ func nullSafeCopy(fields []reflect.Value, targets []any) {
 						// so convert it to a plain decimal string and retry.
 						if s, ok2 := numericString(src); ok2 {
 							err = scanner.Scan(s)
+						}
+						// pgx v5 binary protocol wraps JSONB values with a
+						// 1-byte version header. Strip it so sql.Scanner
+						// implementations (e.g. Jsonb[T]) receive plain JSON.
+						if err != nil {
+							if s, ok2 := jsonbText(src); ok2 {
+								err = scanner.Scan(s)
+							}
 						}
 					}
 					if err != nil {
