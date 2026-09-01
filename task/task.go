@@ -29,14 +29,22 @@ func NewTask[T any](dep T, cache Cache, s *Scheduler) *Task[T] {
 }
 
 func (t *Task[T]) Route(interval time.Duration, name string, lockTTL time.Duration, fn func(context.Context, T)) {
+	t.RouteWithDelay(0, interval, name, lockTTL, fn)
+}
+
+func (t *Task[T]) RouteWithDelay(delay time.Duration, interval time.Duration, name string, lockTTL time.Duration, fn func(context.Context, T)) {
 	if lockTTL <= 0 {
 		panic("lockTTL must be > 0")
+	}
+	if interval <= 0 && delay > 0 {
+		panic("delay requires interval > 0")
 	}
 	task := &genericTask[T]{
 		name:     name,
 		dep:      t.dep,
 		fn:       fn,
 		interval: interval,
+		delay:    delay,
 		lockTTL:  lockTTL,
 		cache:    t.cache,
 		runnerID: t.runnerID,
@@ -49,6 +57,7 @@ type genericTask[T any] struct {
 	dep      T
 	fn       func(context.Context, T)
 	interval time.Duration
+	delay    time.Duration
 	lockTTL  time.Duration
 	cache    Cache
 	runnerID string
@@ -86,8 +95,7 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 		return
 	}
 
-	// 改动点：设置 Timer 为 0 从而实现启动后立即触发一次执行尝试
-	timer := time.NewTimer(0)
+	timer := time.NewTimer(t.delay)
 	defer timer.Stop()
 
 	for {
