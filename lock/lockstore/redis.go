@@ -40,11 +40,18 @@ func (s *RedisStore) SetNx(ctx context.Context, key, owner string, ttl time.Dura
 }
 
 func (s *RedisStore) Get(ctx context.Context, key string) (owner string, ttl time.Duration, err error) {
-	val, err := s.client.Get(ctx, key).Result()
+	// Pipeline GET+TTL into a single round trip. Individual command errors
+	// are checked in order to preserve the original error precedence
+	// (GET failure short-circuits, TTL failure reported next).
+	pipe := s.client.Pipeline()
+	getCmd := pipe.Get(ctx, key)
+	ttlCmd := pipe.TTL(ctx, key)
+	_, _ = pipe.Exec(ctx)
+	val, err := getCmd.Result()
 	if err != nil {
 		return "", 0, err
 	}
-	ttl, err = s.client.TTL(ctx, key).Result()
+	ttl, err = ttlCmd.Result()
 	if err != nil {
 		return "", 0, err
 	}

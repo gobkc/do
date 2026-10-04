@@ -48,14 +48,22 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter, mapper func(*T)
 		return err
 	}
 
+	// Reuse scan buffers across rows: rows.Scan overwrites them every
+	// iteration, so per-row allocation is unnecessary.
+	scanValues := make([]any, len(cols))
+	scanPointers := make([]any, len(cols))
+	for i := range scanValues {
+		scanPointers[i] = &scanValues[i]
+	}
+
 	for rows.Next() {
 		var item T
 		valElement := reflect.ValueOf(&item).Elem()
 
-		scanValues := make([]any, len(cols))
-		scanPointers := make([]any, len(cols))
+		// Clear previous row's values (Scan overwrites all slots on
+		// success; clearing guards drivers that leave slots untouched).
 		for i := range scanValues {
-			scanPointers[i] = &scanValues[i]
+			scanValues[i] = nil
 		}
 
 		if err := rows.Scan(scanPointers...); err != nil {
@@ -68,23 +76,42 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter, mapper func(*T)
 				continue
 			}
 
-			if sIdx, ok := dbColToStructIdx[colName]; ok {
-				field := valElement.Field(sIdx)
-				if !field.CanSet() {
+			sIdx, ok := dbColToStructIdx[colName]
+			if !ok {
+				continue
+			}
+			field := valElement.Field(sIdx)
+			if !field.CanSet() {
+				continue
+			}
+
+			// Fast paths with output identical to the generic path below:
+			// string->string assignment and []byte->string conversion.
+			if field.Kind() == reflect.String {
+				if s, ok := rawVal.(string); ok {
+					field.SetString(s)
 					continue
 				}
+				if b, ok := rawVal.([]byte); ok {
+					field.SetString(string(b))
+					continue
+				}
+			}
 
-				v := reflect.ValueOf(rawVal)
+			v := reflect.ValueOf(rawVal)
 
-				if field.Kind() == reflect.String && v.Kind() == reflect.Slice {
-					field.SetString(fmt.Sprintf("%s", rawVal))
+			if field.Kind() == reflect.String && v.Kind() == reflect.Slice {
+				if b, ok := rawVal.([]byte); ok {
+					field.SetString(string(b))
 				} else {
-					if v.Type().ConvertibleTo(field.Type()) {
-						field.Set(v.Convert(field.Type()))
-					} else {
-						if field.Kind() == reflect.String {
-							field.SetString(fmt.Sprintf("%v", rawVal))
-						}
+					field.SetString(fmt.Sprintf("%s", rawVal))
+				}
+			} else {
+				if v.Type().ConvertibleTo(field.Type()) {
+					field.Set(v.Convert(field.Type()))
+				} else {
+					if field.Kind() == reflect.String {
+						field.SetString(fmt.Sprintf("%v", rawVal))
 					}
 				}
 			}

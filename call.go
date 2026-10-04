@@ -3,12 +3,18 @@ package do
 import (
 	"context"
 	"math/rand"
-	"strings"
 	"time"
 )
 
 func BatchCall[D any, P any](ctx context.Context, params []P, limit int, f func(ctx context.Context, param []P) []D) []D {
 	var results = make([]D, 0, len(params))
+	if len(params) == 0 {
+		return results
+	}
+	// Guard against non-positive limit (previously an infinite loop).
+	if limit <= 0 {
+		limit = len(params)
+	}
 	for i := 0; i < len(params); i += limit {
 		if err := ctx.Err(); err != nil {
 			return results
@@ -20,8 +26,18 @@ func BatchCall[D any, P any](ctx context.Context, params []P, limit int, f func(
 }
 
 func BatchCallPagination[T any](ctx context.Context, limit int64, f func(ctx context.Context, offset int64) []T) []T {
+	// Guard against non-positive limit (previously offset never advanced).
+	if limit <= 0 {
+		limit = 1
+	}
+	// Bound the initial capacity: the old limit*2 could over-allocate
+	// gigabytes for large page sizes. Capacity is not observable.
+	initCap := limit * 2
+	if initCap > 1024 {
+		initCap = 1024
+	}
 	var offset int64
-	var results = make([]T, 0, limit*2)
+	var results = make([]T, 0, initCap)
 	for {
 		if err := ctx.Err(); err != nil {
 			return results
@@ -65,14 +81,21 @@ func RetryCall[T any](
 			return zero, err
 		}
 
-		// ⭐ jitter
-		jitter := time.Duration(rand.Int63n(int64(delay / 2)))
+		// ⭐ jitter (guard tiny delays: Int63n(0) would panic)
+		var jitter time.Duration
+		if delay > 1 {
+			jitter = time.Duration(rand.Int63n(int64(delay / 2)))
+		}
 
+		// Use NewTimer + Stop instead of time.After to avoid leaking
+		// a timer on every retry until it fires.
+		timer := time.NewTimer(delay + jitter)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return zero, ctx.Err()
 
-		case <-time.After(delay + jitter):
+		case <-timer.C:
 		}
 
 		// exponential backoff
@@ -86,13 +109,52 @@ func RetryCall[T any](
 	return zero, nil
 }
 
+// containsFoldASCII reports whether s contains sub, comparing ASCII
+// letters case-insensitively. sub must already be uppercase ASCII.
+// Equivalent to strings.Contains(strings.ToUpper(s), sub) for these
+// ASCII keywords, but without allocating the uppercased copy.
+func containsFoldASCII(s, sub string) bool {
+	if len(sub) == 0 {
+		return true
+	}
+	if len(s) < len(sub) {
+		return false
+	}
+	for i := 0; i+len(sub) <= len(s); i++ {
+		matched := true
+		for j := 0; j < len(sub); j++ {
+			c := s[i+j]
+			if c >= 'a' && c <= 'z' {
+				c -= 'a' - 'A'
+			}
+			if c != sub[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 func isRetryable(err error) bool {
-	e := strings.ToUpper(err.Error())
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if msg == "" {
+		return false
+	}
+	// Single pass over msg per keyword, zero allocations.
+	// Keywords are checked longest-first so a match short-circuits early
+	// on the most distinctive token.
 	switch {
-	case strings.Contains(e, "UNAVAILABLE"),
-		strings.Contains(e, "DEADLINE_EXCEEDED"),
-		strings.Contains(e, "RESOURCE_EXHAUSTED"),
-		strings.Contains(e, "ABORTED"):
+	case containsFoldASCII(msg, "DEADLINE_EXCEEDED"),
+		containsFoldASCII(msg, "RESOURCE_EXHAUSTED"),
+		containsFoldASCII(msg, "UNAVAILABLE"),
+		containsFoldASCII(msg, "ABORTED"):
 		return true
 	}
 	return false

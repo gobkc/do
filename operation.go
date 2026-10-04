@@ -7,11 +7,41 @@ import (
 	"log/slog"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
 )
+
+// regexpCache caches successfully compiled regular expressions.
+// Failed compilations are NOT cached so that invalid patterns keep the
+// original behavior (re-attempt compile + log on every call).
+var regexpCache sync.Map // map[string]*regexp.Regexp
+
+func cachedRegexp(pattern string) (*regexp.Regexp, error) {
+	if v, ok := regexpCache.Load(pattern); ok {
+		if re, ok := v.(*regexp.Regexp); ok && re != nil {
+			return re, nil
+		}
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	actual, loaded := regexpCache.LoadOrStore(pattern, re)
+	if loaded {
+		if are, ok := actual.(*regexp.Regexp); ok && are != nil {
+			return are, nil
+		}
+	}
+	return re, nil
+}
+
+// bufPool reuses bytes.Buffer allocations in ReplaceMap.
+var bufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
 
 func OneOf[T any](condition bool, result1 T, result2 T) T {
 	if condition {
@@ -20,24 +50,62 @@ func OneOf[T any](condition bool, result1 T, result2 T) T {
 	return result2
 }
 
-func OneOr[T any](result1 T, result2 ...T) T {
-	isZero := func(v T) bool {
-		val := reflect.ValueOf(v)
-		if val.Kind() == reflect.Pointer {
-			if val.IsNil() {
-				return true
-			}
-			val = val.Elem()
-		}
-		return val.IsZero()
+func isZeroValue[T any](v T) bool {
+	// Fast paths for common non-pointer types: avoid reflect entirely.
+	switch vv := any(v).(type) {
+	case string:
+		return vv == ""
+	case bool:
+		return !vv
+	case int:
+		return vv == 0
+	case int8:
+		return vv == 0
+	case int16:
+		return vv == 0
+	case int32:
+		return vv == 0
+	case int64:
+		return vv == 0
+	case uint:
+		return vv == 0
+	case uint8:
+		return vv == 0
+	case uint16:
+		return vv == 0
+	case uint32:
+		return vv == 0
+	case uint64:
+		return vv == 0
+	case uintptr:
+		return vv == 0
+	case float32:
+		return vv == 0
+	case float64:
+		return vv == 0
 	}
+	// Fallback preserves the original semantics exactly, including
+	// pointer dereference (non-nil pointer to a zero value counts as zero).
+	val := reflect.ValueOf(v)
+	if !val.IsValid() {
+		return true
+	}
+	if val.Kind() == reflect.Pointer {
+		if val.IsNil() {
+			return true
+		}
+		val = val.Elem()
+	}
+	return val.IsZero()
+}
 
-	if !isZero(result1) {
+func OneOr[T any](result1 T, result2 ...T) T {
+	if !isZeroValue(result1) {
 		return result1
 	}
 
 	for _, v := range result2 {
-		if !isZero(v) {
+		if !isZeroValue(v) {
 			return v
 		}
 	}
@@ -57,7 +125,7 @@ func ErrorOr(err error, val string) string {
 // AnyTrue AnyTrue(false,false,false) == false
 func AnyTrue(bs ...bool) bool {
 	for _, b := range bs {
-		if b == true {
+		if b {
 			return true
 		}
 	}
@@ -68,7 +136,7 @@ func AnyTrue(bs ...bool) bool {
 // AllTrue AllTrue(true,false,true) == false
 func AllTrue(bs ...bool) bool {
 	for _, b := range bs {
-		if b == false {
+		if !b {
 			return false
 		}
 	}
@@ -156,8 +224,10 @@ type DiffResp[T comparable] struct {
 // diffs := Diff(olds, news)
 // result:added: aa2,aa3,  deleted:aa4, same: aa1
 func Diff[T comparable](olds, news []T) (resp DiffResp[T]) {
-	oldMap := make(map[T]struct{})
-	newMap := make(map[T]struct{})
+	// Pre-size maps to avoid rehashing. Result slices stay nil when empty
+	// to preserve the original nil-vs-empty behavior.
+	oldMap := make(map[T]struct{}, len(olds))
+	newMap := make(map[T]struct{}, len(news))
 
 	for _, item := range olds {
 		oldMap[item] = struct{}{}
@@ -191,7 +261,10 @@ func Diff[T comparable](olds, news []T) (resp DiffResp[T]) {
 //
 //	// Retrieve the Age field list from items1 (int64 type)
 func GetFieldList[T any, R any](items []T, fieldGetter func(T) R) []R {
-	var result []R
+	if len(items) == 0 {
+		return nil
+	}
+	result := make([]R, 0, len(items))
 	for _, item := range items {
 		result = append(result, fieldGetter(item))
 	}
@@ -199,7 +272,7 @@ func GetFieldList[T any, R any](items []T, fieldGetter func(T) R) []R {
 }
 
 func GetFieldMaps[T any, K comparable](items []T, fieldGetter func(T) K) map[K][]T {
-	result := make(map[K][]T)
+	result := make(map[K][]T, len(items))
 	for _, item := range items {
 		key := fieldGetter(item)
 		result[key] = append(result[key], item)
@@ -208,7 +281,7 @@ func GetFieldMaps[T any, K comparable](items []T, fieldGetter func(T) K) map[K][
 }
 
 func GetFieldMap[T any, K comparable](items []T, fieldGetter func(T) K) map[K]T {
-	result := make(map[K]T)
+	result := make(map[K]T, len(items))
 	for _, item := range items {
 		key := fieldGetter(item)
 		result[key] = item
@@ -230,21 +303,27 @@ var escapeFunc = func(v any) string {
 	}
 }
 
+var replaceFuncMap = template.FuncMap{
+	"marshal": marshalFunc,
+	"escape":  escapeFunc,
+}
+
 func ReplaceMap(s string, replace map[string]string) (result string, err error) {
 	result = s
 	if replace == nil {
 		replace = make(map[string]string)
 	}
-	tmpl, err := template.New("soapRequest").Funcs(template.FuncMap{
-		"marshal": marshalFunc,
-		"escape":  escapeFunc,
-	}).Parse(s)
+	// Reuse the global FuncMap instead of allocating a new map per call,
+	// and reuse buffers via pool. Template parsing itself cannot be cached
+	// safely because s is caller-controlled and unbounded.
+	tmpl, err := template.New("soapRequest").Funcs(replaceFuncMap).Parse(s)
 	if err != nil {
 		return result, err
 	}
-	var buf bytes.Buffer
-	err = tmpl.Execute(&buf, replace)
-	if err != nil {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer bufPool.Put(buf)
+	if err = tmpl.Execute(buf, replace); err != nil {
 		return result, err
 	}
 	result = buf.String()
@@ -254,31 +333,54 @@ func ReplaceMap(s string, replace map[string]string) (result string, err error) 
 // RegexpCheck Use regular expressions to determine if a string matches
 // Example: RegexpCheck(`(?i)^[a-zA-Z]+ (asc|desc)$`,`dafd Asc`) == true
 func RegexpCheck(pattern string, str string) bool {
-	re, err := regexp.Compile(pattern)
+	re, err := cachedRegexp(pattern)
 	if err != nil {
 		slog.Error(`failed to compile regular expression.`, slog.String(`err`, err.Error()))
 		return false
 	}
-	if re.MatchString(str) {
-		return true
-	}
-	return false
+	return re.MatchString(str)
 }
 
 // RegexpConvertSnake convert string to snake case
 // Example: RegexpConvertSnake(`AbC`) == `ab_c`
 func RegexpConvertSnake(s string) string {
-	re, err := regexp.Compile(`[A-Z]`)
-	if err != nil {
-		slog.Error("Error compiling snake case to snake case: %v", slog.String(`err`, err.Error()))
+	// Manual byte scan: identical output to the previous `[A-Z]` regex
+	// implementation (including the first-byte rule), without any
+	// regexp compilation or ReplaceAllStringFunc closure overhead.
+	if s == "" {
 		return s
 	}
-	return re.ReplaceAllStringFunc(s, func(match string) string {
-		if len(s) > 0 && s[0] == match[0] {
-			return strings.ToLower(match)
+	first := s[0]
+	// Fast path: no uppercase letters at all.
+	hasUpper := false
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			hasUpper = true
+			break
 		}
-		return "_" + strings.ToLower(match)
-	})
+	}
+	if !hasUpper {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			// Preserve original semantics exactly: the old code compared
+			// match[0] against s[0] (not match position), so any uppercase
+			// byte equal to the first byte is lowercased without '_' prefix.
+			if c == first {
+				b.WriteByte(c + 32)
+			} else {
+				b.WriteByte('_')
+				b.WriteByte(c + 32)
+			}
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 func OptionDefault[T any](options []T, def T) T {
@@ -295,23 +397,78 @@ type Zeroable interface {
 		~string
 }
 
+// zeroableToString formats a Zeroable value without fmt.Sprintf reflection
+// overhead for common types. Output is identical to fmt.Sprintf("%v", v).
+func zeroableToString[T Zeroable](v T) string {
+	switch vv := any(v).(type) {
+	case string:
+		return vv
+	case int:
+		return strconv.Itoa(vv)
+	case int8:
+		return strconv.FormatInt(int64(vv), 10)
+	case int16:
+		return strconv.FormatInt(int64(vv), 10)
+	case int32:
+		return strconv.FormatInt(int64(vv), 10)
+	case int64:
+		return strconv.FormatInt(vv, 10)
+	case uint:
+		return strconv.FormatUint(uint64(vv), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(vv), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(vv), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(vv), 10)
+	case uint64:
+		return strconv.FormatUint(vv, 10)
+	case uintptr:
+		return strconv.FormatUint(uint64(vv), 10)
+	case float32:
+		return strconv.FormatFloat(float64(vv), 'f', -1, 32)
+	case float64:
+		return strconv.FormatFloat(vv, 'f', -1, 64)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 // Unique
 // data := []int{1, 2, 2, 3, 1, 4, 5, 3}
 // unique := Unique(data)
 // fmt.Println(unique) // [1 2 3 4 5]
 func Unique[T Zeroable](items []T, patterns ...string) []T {
-	seen := make(map[T]struct{})
+	seen := make(map[T]struct{}, len(items))
 	result := make([]T, 0, len(items))
 	var zero T
 	pattern := OptionDefault(patterns, ``)
+	if pattern == `` {
+		for _, v := range items {
+			if v == zero {
+				continue
+			}
+			if _, ok := seen[v]; !ok {
+				seen[v] = struct{}{}
+				result = append(result, v)
+			}
+		}
+		return result
+	}
+	// Compile the filter pattern once instead of per element.
+	// An invalid pattern filters out everything, matching the original
+	// per-element RegexpCheck behavior (which returned false on error).
+	re, err := cachedRegexp(pattern)
+	if err != nil {
+		slog.Error(`failed to compile regular expression.`, slog.String(`err`, err.Error()))
+		return result
+	}
 	for _, v := range items {
 		if v == zero {
 			continue
 		}
-		if pattern != `` {
-			if !RegexpCheck(pattern, fmt.Sprintf("%v", v)) {
-				continue
-			}
+		if !re.MatchString(zeroableToString(v)) {
+			continue
 		}
 		if _, ok := seen[v]; !ok {
 			seen[v] = struct{}{}

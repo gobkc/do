@@ -129,10 +129,17 @@ func (e *StreamExport) WriteRow(values []any) error {
 
 func (e *StreamExport) writeRowWithStyle(values []any, styleID int, height float64) error {
 	for i, val := range values {
-		strVal := fmt.Sprintf("%v", val)
-		width := float64(utf8.RuneCountInString(strVal)) * 1.2
-		if len(strVal) > utf8.RuneCountInString(strVal) {
-			width += float64(len(strVal)-utf8.RuneCountInString(strVal)) * 0.6
+		// Fast path: %v on a string is the string itself.
+		var strVal string
+		if s, ok := val.(string); ok {
+			strVal = s
+		} else {
+			strVal = fmt.Sprintf("%v", val)
+		}
+		runes := utf8.RuneCountInString(strVal)
+		width := float64(runes) * 1.2
+		if len(strVal) > runes {
+			width += float64(len(strVal)-runes) * 0.6
 		}
 
 		colIdx := i + 1

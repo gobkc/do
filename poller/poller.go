@@ -24,6 +24,13 @@ func NewPoller[T any](interval time.Duration) *Poller[T] {
 
 func (p *Poller[T]) Start(query func() (*T, error)) {
 	go func() {
+		timer := time.NewTimer(0)
+		defer timer.Stop()
+		// Drain the initial immediate tick.
+		select {
+		case <-timer.C:
+		default:
+		}
 		for {
 			select {
 			case <-p.done:
@@ -31,11 +38,26 @@ func (p *Poller[T]) Start(query func() (*T, error)) {
 			default:
 				result, err := query()
 				if err != nil {
-					p.errCh <- err
+					select {
+					case p.errCh <- err:
+					case <-p.done:
+						return
+					}
 				} else {
-					p.resultCh <- result
+					select {
+					case p.resultCh <- result:
+					case <-p.done:
+						return
+					}
 				}
-				time.Sleep(p.interval)
+				// Sleep that wakes promptly on Stop instead of delaying
+				// shutdown by up to a full interval.
+				timer.Reset(p.interval)
+				select {
+				case <-p.done:
+					return
+				case <-timer.C:
+				}
 			}
 		}
 	}()
@@ -54,16 +76,26 @@ func (p *Poller[T]) Stop() {
 
 func (p *Poller[T]) Then(f func(*T)) {
 	go func() {
-		for r := range p.resultCh {
-			f(r)
+		for {
+			select {
+			case <-p.done:
+				return
+			case r := <-p.resultCh:
+				f(r)
+			}
 		}
 	}()
 }
 
 func (p *Poller[T]) Catch(f func(error)) {
 	go func() {
-		for err := range p.errCh {
-			f(err)
+		for {
+			select {
+			case <-p.done:
+				return
+			case err := <-p.errCh:
+				f(err)
+			}
 		}
 	}()
 }

@@ -1,7 +1,6 @@
 package curd
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -87,42 +86,42 @@ func (b *ArgBuilder) ArgsSlice() []any {
 // Eq returns a Predicate for field = value.
 func Eq(field string, value any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s = %s", field, b.Arg(value))
+		return field + " = " + b.Arg(value)
 	}
 }
 
 // Ne returns a Predicate for field != value.
 func Ne(field string, value any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s != %s", field, b.Arg(value))
+		return field + " != " + b.Arg(value)
 	}
 }
 
 // Gt returns a Predicate for field > value.
 func Gt(field string, value any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s > %s", field, b.Arg(value))
+		return field + " > " + b.Arg(value)
 	}
 }
 
 // Gte returns a Predicate for field >= value.
 func Gte(field string, value any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s >= %s", field, b.Arg(value))
+		return field + " >= " + b.Arg(value)
 	}
 }
 
 // Lt returns a Predicate for field < value.
 func Lt(field string, value any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s < %s", field, b.Arg(value))
+		return field + " < " + b.Arg(value)
 	}
 }
 
 // Lte returns a Predicate for field <= value.
 func Lte(field string, value any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s <= %s", field, b.Arg(value))
+		return field + " <= " + b.Arg(value)
 	}
 }
 
@@ -133,7 +132,7 @@ func In(field string, values ...any) Predicate {
 		if len(values) == 0 {
 			return "FALSE"
 		}
-		return fmt.Sprintf("%s IN (%s)", field, b.Args(values...))
+		return field + " IN (" + b.Args(values...) + ")"
 	}
 }
 
@@ -144,42 +143,44 @@ func NotIn(field string, values ...any) Predicate {
 		if len(values) == 0 {
 			return "TRUE"
 		}
-		return fmt.Sprintf("%s NOT IN (%s)", field, b.Args(values...))
+		return field + " NOT IN (" + b.Args(values...) + ")"
 	}
 }
 
 // Like returns a Predicate for field LIKE pattern.
 func Like(field string, pattern any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s LIKE %s", field, b.Arg(pattern))
+		return field + " LIKE " + b.Arg(pattern)
 	}
 }
 
 // ILike returns a Predicate for field ILIKE pattern (PostgreSQL).
 func ILike(field string, pattern any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s ILIKE %s", field, b.Arg(pattern))
+		return field + " ILIKE " + b.Arg(pattern)
 	}
 }
 
 // IsNull returns a Predicate for field IS NULL.
 func IsNull(field string) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s IS NULL", field)
+		return field + " IS NULL"
 	}
 }
 
 // IsNotNull returns a Predicate for field IS NOT NULL.
 func IsNotNull(field string) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s IS NOT NULL", field)
+		return field + " IS NOT NULL"
 	}
 }
 
 // Between returns a Predicate for field BETWEEN lo AND hi.
 func Between(field string, lo, hi any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s BETWEEN %s AND %s", field, b.Arg(lo), b.Arg(hi))
+		loPh := b.Arg(lo)
+		hiPh := b.Arg(hi)
+		return field + " BETWEEN " + loPh + " AND " + hiPh
 	}
 }
 
@@ -189,13 +190,13 @@ func Between(field string, lo, hi any) Predicate {
 //	curd.Eq(curd.JSONField("payload", "uuid"), someUUID)
 //	// generates: payload->>'uuid' = $1
 func JSONField(field, key string) string {
-	return fmt.Sprintf("%s->>'%s'", field, key)
+	return field + "->>'" + key + "'"
 }
 
 // JSONContains returns a Predicate for field @> value (PostgreSQL JSONB contains).
 func JSONContains(field string, value any) Predicate {
 	return func(b *ArgBuilder) string {
-		return fmt.Sprintf("%s @> %s", field, b.Arg(value))
+		return field + " @> " + b.Arg(value)
 	}
 }
 
@@ -206,7 +207,7 @@ func JSONContains(field string, value any) Predicate {
 // If no sub-predicates remain after filtering, returns empty string (no condition).
 func And(preds ...Predicate) Predicate {
 	return func(b *ArgBuilder) string {
-		var parts []string
+		parts := make([]string, 0, len(preds))
 		for _, p := range preds {
 			if p == nil {
 				continue
@@ -229,7 +230,7 @@ func And(preds ...Predicate) Predicate {
 // If no sub-predicates remain after filtering, returns empty string.
 func Or(preds ...Predicate) Predicate {
 	return func(b *ArgBuilder) string {
-		var parts []string
+		parts := make([]string, 0, len(preds))
 		for _, p := range preds {
 			if p == nil {
 				continue
@@ -275,14 +276,14 @@ func MapWhere(m map[string]any) Predicate {
 		return nil
 	}
 	return func(b *ArgBuilder) string {
-		var conds []string
+		conds := make([]string, 0, len(m))
 		for col, val := range m {
 			if val == nil {
-				conds = append(conds, fmt.Sprintf("%s IS NULL", col))
+				conds = append(conds, col+" IS NULL")
 			} else if sl, ok := val.([]any); ok {
-				conds = append(conds, fmt.Sprintf("%s = ANY(%s)", col, b.Arg(sl)))
+				conds = append(conds, col+" = ANY("+b.Arg(sl)+")")
 			} else {
-				conds = append(conds, fmt.Sprintf("%s = %s", col, b.Arg(val)))
+				conds = append(conds, col+" = "+b.Arg(val))
 			}
 		}
 		return strings.Join(conds, " AND ")

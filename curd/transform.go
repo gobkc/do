@@ -37,12 +37,12 @@ func ComposeTransformers(transformers ...FieldTransformer) FieldTransformer {
 //
 //	c.WithTransformer(JSONBMarshaler("metadata", "tags"))
 func JSONBMarshaler(fields ...string) FieldTransformer {
-	fieldSet := make(map[string]bool, len(fields))
+	fieldSet := make(map[string]struct{}, len(fields))
 	for _, f := range fields {
-		fieldSet[f] = true
+		fieldSet[f] = struct{}{}
 	}
 	return func(fieldName string, value any) any {
-		if !fieldSet[fieldName] || value == nil {
+		if _, ok := fieldSet[fieldName]; !ok || value == nil {
 			return value
 		}
 		data, err := json.Marshal(value)
@@ -62,12 +62,12 @@ func JSONBMarshaler(fields ...string) FieldTransformer {
 //
 //	c.WithTransformer(XMLMarshaler("document"))
 func XMLMarshaler(fields ...string) FieldTransformer {
-	fieldSet := make(map[string]bool, len(fields))
+	fieldSet := make(map[string]struct{}, len(fields))
 	for _, f := range fields {
-		fieldSet[f] = true
+		fieldSet[f] = struct{}{}
 	}
 	return func(fieldName string, value any) any {
-		if !fieldSet[fieldName] || value == nil {
+		if _, ok := fieldSet[fieldName]; !ok || value == nil {
 			return value
 		}
 		data, err := xml.Marshal(value)

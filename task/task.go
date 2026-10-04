@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// runnerSeq provides process-unique runner suffixes without allocating a
+// new math/rand source per Task.
+var runnerSeq atomic.Uint64
 
 type Task[T any] struct {
 	dep      T
@@ -18,8 +21,7 @@ type Task[T any] struct {
 }
 
 func NewTask[T any](dep T, cache Cache, s *Scheduler) *Task[T] {
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
-	id := fmt.Sprintf("runner-%d-%d", time.Now().UnixNano(), r.Int63())
+	id := fmt.Sprintf("runner-%d-%d", time.Now().UnixNano(), runnerSeq.Add(1))
 	return &Task[T]{
 		dep:      dep,
 		cache:    cache,
@@ -111,12 +113,13 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 			acquired, err := t.cache.SetNx(ctx, lockKey, t.runnerID, t.lockTTL)
 			if err != nil || !acquired {
 				t.running.Store(false)
-				// 改动点：抢锁失败也需要重置定时器，进入下一个周期的竞争
+				// 抢锁失败也需要重置定时器，进入下一个周期的竞争
 				timer.Reset(t.interval)
 				continue
 			}
 
 			jobCtx, jobCancel := context.WithCancel(ctx)
+			jobDone := make(chan struct{})
 			wg.Add(2)
 
 			go func() {
@@ -129,8 +132,7 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 				defer jobCancel()
 				defer t.running.Store(false)
 				defer t.releaseLock(lockKey)
-				// 改动点：任务执行完成后，根据 interval 重置定时器，实现“执行完后再等 interval”
-				defer timer.Reset(t.interval)
+				defer close(jobDone)
 
 				defer func() {
 					if r := recover(); r != nil {
@@ -140,6 +142,18 @@ func (t *genericTask[T]) run(ctx context.Context, wg *sync.WaitGroup) {
 
 				t.fn(jobCtx, t.dep)
 			}()
+
+			// The loop goroutine solely owns timer: it resets the timer
+			// only after the job signals completion ("执行完后再等 interval").
+			// Resetting from the job goroutine raced with the loop's own
+			// resets and broke timer guarantees.
+			select {
+			case <-ctx.Done():
+				jobCancel()
+				return
+			case <-jobDone:
+				timer.Reset(t.interval)
+			}
 		}
 	}
 }

@@ -7,8 +7,18 @@ import (
 	"log/slog"
 	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
+)
+
+// typeMetaCache caches per-entity-type metadata derived from reflection:
+// table names and soft-delete (DeletedDate) support. Keys are the
+// reflect.Type of T (deref not needed — each T maps to exactly one entry).
+var (
+	tableNameCache  sync.Map // map[reflect.Type]string
+	hasDeletedCache sync.Map // map[reflect.Type]bool
 )
 
 // globalSQLLog controls SQL logging for standalone functions (QueryRaw, ExecRaw, etc.).
@@ -118,6 +128,7 @@ func formatSQL(query string, args ...any) string {
 		return query
 	}
 	var buf strings.Builder
+	buf.Grow(len(query) + len(args)*8)
 	i := 0
 	for i < len(query) {
 		if query[i] == '$' && i+1 < len(query) && isDigit(query[i+1]) {
@@ -160,18 +171,39 @@ func formatArg(arg any) string {
 			return "true"
 		}
 		return "false"
-	case int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64,
-		float32, float64:
-		return fmt.Sprintf("%v", v)
+	case int:
+		return strconv.Itoa(v)
+	case int8:
+		return strconv.FormatInt(int64(v), 10)
+	case int16:
+		return strconv.FormatInt(int64(v), 10)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case float32:
+		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
 	case []byte:
 		return "'" + strings.ReplaceAll(string(v), "'", "''") + "'"
 	default:
 		// Handle slices (e.g. for = ANY($1) or IN clauses)
 		rv := reflect.ValueOf(arg)
-		if rv.Kind() == reflect.Slice {
-			var parts []string
-			for k := 0; k < rv.Len(); k++ {
+		if rv.IsValid() && rv.Kind() == reflect.Slice {
+			n := rv.Len()
+			parts := make([]string, 0, n)
+			for k := 0; k < n; k++ {
 				parts = append(parts, formatArg(rv.Index(k).Interface()))
 			}
 			return strings.Join(parts, ", ")
@@ -186,35 +218,61 @@ func formatArg(arg any) string {
 // It handles both value types (e.g. VPaymentOrder) and pointer types
 // (e.g. *VPaymentOrder). When T is a pointer, var t T would be nil and
 // calling a value-receiver TableName() on a nil pointer would panic.
+// Results are cached per T so repeated queries avoid reflection.
 func tableName[T Table]() string {
+	key := reflect.TypeOf((*T)(nil)).Elem()
+	if v, ok := tableNameCache.Load(key); ok {
+		return v.(string)
+	}
 	var zero T
 	rv := reflect.ValueOf(&zero).Elem()
+	var name string
 	if rv.Kind() == reflect.Ptr {
-		return reflect.New(rv.Type().Elem()).Interface().(Table).TableName()
+		name = reflect.New(rv.Type().Elem()).Interface().(Table).TableName()
+	} else {
+		name = zero.TableName()
 	}
-	return zero.TableName()
+	actual, loaded := tableNameCache.LoadOrStore(key, name)
+	if loaded {
+		return actual.(string)
+	}
+	return name
+}
+
+// typeHasDeletedDate reports whether entities of type T carry a DeletedDate
+// field (soft-delete support). The reflection result is cached per T.
+func typeHasDeletedDate[T Table]() bool {
+	key := reflect.TypeOf((*T)(nil)).Elem()
+	if v, ok := hasDeletedCache.Load(key); ok {
+		return v.(bool)
+	}
+	var t T
+	ok := hasFieldUncached(t, "DeletedDate")
+	actual, loaded := hasDeletedCache.LoadOrStore(key, ok)
+	if loaded {
+		return actual.(bool)
+	}
+	return ok
 }
 
 // buildWhereClause evaluates a Predicate and combines it with the soft-delete
 // filter (deleted_date IS NULL) when the entity has a DeletedDate field.
 // Returns the complete " WHERE ..." clause and collected arguments.
 func (c *Curd[T]) buildWhereClause(where Predicate) (clause string, args []any) {
-	var t T
-
 	userClause, userArgs := buildPredicate(where, c.dialect)
+	hasDeleted := typeHasDeletedDate[T]()
 
-	var parts []string
-	if userClause != "" {
-		parts = append(parts, userClause)
+	// Avoid slice allocation + Join for the common cases.
+	if userClause == "" {
+		if !hasDeleted {
+			return "", nil
+		}
+		return " WHERE deleted_date IS NULL", userArgs
 	}
-	if hasField(t, "DeletedDate") {
-		parts = append(parts, "deleted_date IS NULL")
+	if !hasDeleted {
+		return " WHERE " + userClause, userArgs
 	}
-
-	if len(parts) == 0 {
-		return "", nil
-	}
-	return " WHERE " + strings.Join(parts, " AND "), userArgs
+	return " WHERE " + userClause + " AND deleted_date IS NULL", userArgs
 }
 
 // --- Query methods ---
@@ -228,18 +286,18 @@ func (c *Curd[T]) FindAll(ctx context.Context, where Predicate, orderBy string, 
 
 	whereClause, args := c.buildWhereClause(where)
 
-	query := fmt.Sprintf("SELECT %s FROM %s%s", strings.Join(cols, ","), name, whereClause)
+	query := "SELECT " + strings.Join(cols, ",") + " FROM " + name + whereClause
 	if orderBy != "" {
 		query += " ORDER BY " + orderBy
 	}
 	nextIdx := len(args) + 1
 	if limit > 0 {
-		query += fmt.Sprintf(" LIMIT %s", c.dialect.Placeholder(nextIdx))
+		query += " LIMIT " + c.dialect.Placeholder(nextIdx)
 		args = append(args, limit)
 		nextIdx++
 	}
 	if offset > 0 {
-		query += fmt.Sprintf(" OFFSET %s", c.dialect.Placeholder(nextIdx))
+		query += " OFFSET " + c.dialect.Placeholder(nextIdx)
 		args = append(args, offset)
 	}
 
@@ -293,25 +351,33 @@ func (c *Curd[T]) Find(ctx context.Context, opts ...FindOption) ([]T, error) {
 		cols = columnsFromType(reflect.TypeOf(t), c.fm)
 	}
 
-	fromClause := name
+	var fromBuilder strings.Builder
+	fromBuilder.Grow(len(name) + len(cfg.joins)*32)
+	fromBuilder.WriteString(name)
 	for _, j := range cfg.joins {
-		fromClause += fmt.Sprintf(" %s JOIN %s ON %s", j.Type, j.Table, j.On)
+		fromBuilder.WriteString(" ")
+		fromBuilder.WriteString(string(j.Type))
+		fromBuilder.WriteString(" JOIN ")
+		fromBuilder.WriteString(j.Table)
+		fromBuilder.WriteString(" ON ")
+		fromBuilder.WriteString(j.On)
 	}
+	fromClause := fromBuilder.String()
 
 	whereClause, args := c.buildWhereClause(cfg.where)
 
-	query := fmt.Sprintf("SELECT %s FROM %s%s", strings.Join(cols, ","), fromClause, whereClause)
+	query := "SELECT " + strings.Join(cols, ",") + " FROM " + fromClause + whereClause
 	if cfg.orderBy != "" {
 		query += " ORDER BY " + cfg.orderBy
 	}
 	nextIdx := len(args) + 1
 	if cfg.limit > 0 {
-		query += fmt.Sprintf(" LIMIT %s", c.dialect.Placeholder(nextIdx))
+		query += " LIMIT " + c.dialect.Placeholder(nextIdx)
 		args = append(args, cfg.limit)
 		nextIdx++
 	}
 	if cfg.offset > 0 {
-		query += fmt.Sprintf(" OFFSET %s", c.dialect.Placeholder(nextIdx))
+		query += " OFFSET " + c.dialect.Placeholder(nextIdx)
 		args = append(args, cfg.offset)
 	}
 
@@ -338,15 +404,29 @@ func (c *Curd[T]) FindPaginated(ctx context.Context, opts ...FindOption) (*Pagin
 
 	name := tableName[T]()
 
-	fromClause := name
+	var fromBuilder strings.Builder
+	fromBuilder.Grow(len(name) + len(cfg.joins)*32)
+	fromBuilder.WriteString(name)
 	for _, j := range cfg.joins {
-		fromClause += fmt.Sprintf(" %s JOIN %s ON %s", j.Type, j.Table, j.On)
+		fromBuilder.WriteString(" ")
+		fromBuilder.WriteString(string(j.Type))
+		fromBuilder.WriteString(" JOIN ")
+		fromBuilder.WriteString(j.Table)
+		fromBuilder.WriteString(" ON ")
+		fromBuilder.WriteString(j.On)
 	}
+	fromClause := fromBuilder.String()
 
 	whereClause, whereArgs := c.buildWhereClause(cfg.where)
 
-	// COUNT uses a subquery to handle JOINs correctly
-	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT 1 FROM %s%s) AS _curd_count", fromClause, whereClause)
+	// Fast path without JOINs: plain COUNT(*) avoids the subquery overhead.
+	// With JOINs the subquery is required to count joined rows correctly.
+	var countQuery string
+	if len(cfg.joins) == 0 {
+		countQuery = "SELECT COUNT(*) FROM " + fromClause + whereClause
+	} else {
+		countQuery = "SELECT COUNT(*) FROM (SELECT 1 FROM " + fromClause + whereClause + ") AS _curd_count"
+	}
 	var total int64
 	defer c.logSQL(ctx, countQuery, whereArgs...)()
 	if err := c.q.QueryRow(ctx, countQuery, whereArgs...).Scan(&total); err != nil {
@@ -384,17 +464,23 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 
 	returningClause := ""
 	idFieldName := ""
-	if hasField(t, "ID") {
+	if _, ok := cachedFieldIndex(t, "ID"); ok {
 		idFieldName = "ID"
-	} else if hasField(t, "Id") {
+	} else if _, ok := cachedFieldIndex(t, "Id"); ok {
 		idFieldName = "Id"
+	} else {
+		// Fallback for promoted fields not covered by the cache.
+		if hasFieldUncached(t, "ID") {
+			idFieldName = "ID"
+		} else if hasFieldUncached(t, "Id") {
+			idFieldName = "Id"
+		}
 	}
 	if idFieldName != "" {
 		returningClause = " RETURNING id"
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)%s",
-		tableName, strings.Join(cols, ","), strings.Join(placeholders, ","), returningClause)
+	query := "INSERT INTO " + tableName + " (" + strings.Join(cols, ",") + ") VALUES (" + strings.Join(placeholders, ",") + ")" + returningClause
 
 	if returningClause != "" {
 		defer c.logSQL(ctx, query, args...)()
@@ -445,7 +531,7 @@ func (c *Curd[T]) InsertBatch(ctx context.Context, rows []T) error {
 		args = append(args, vals...)
 	}
 
-	query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", tableName, strings.Join(cols, ","), strings.Join(placeholders, ","))
+	query := "INSERT INTO " + tableName + " (" + strings.Join(cols, ",") + ") VALUES " + strings.Join(placeholders, ",")
 	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
@@ -476,11 +562,11 @@ func (c *Curd[T]) UpdateByID(ctx context.Context, id any, updates map[string]any
 	args[0] = id
 	argIdx := 2
 	for col, val := range updates {
-		setClauses = append(setClauses, fmt.Sprintf("%s = %s", col, c.dialect.Placeholder(argIdx)))
+		setClauses = append(setClauses, col+" = "+c.dialect.Placeholder(argIdx))
 		args = append(args, val)
 		argIdx++
 	}
-	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = %s", tableName, strings.Join(setClauses, ","), c.dialect.Placeholder(1))
+	query := "UPDATE " + tableName + " SET " + strings.Join(setClauses, ",") + " WHERE id = " + c.dialect.Placeholder(1)
 	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
@@ -498,7 +584,7 @@ func (c *Curd[T]) UpdateWhere(ctx context.Context, where Predicate, updates map[
 	args := make([]any, 0, len(updates)+4) // +4 for typical WHERE args
 	argIdx := 1
 	for col, val := range updates {
-		setClauses = append(setClauses, fmt.Sprintf("%s = %s", col, c.dialect.Placeholder(argIdx)))
+		setClauses = append(setClauses, col+" = "+c.dialect.Placeholder(argIdx))
 		args = append(args, val)
 		argIdx++
 	}
@@ -513,7 +599,7 @@ func (c *Curd[T]) UpdateWhere(ctx context.Context, where Predicate, updates map[
 		args = append(args, whereArgs...)
 	}
 
-	query := fmt.Sprintf("UPDATE %s SET %s%s", tableName, strings.Join(setClauses, ","), whereSQL)
+	query := "UPDATE " + tableName + " SET " + strings.Join(setClauses, ",") + whereSQL
 	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	if err != nil {
@@ -529,12 +615,12 @@ func (c *Curd[T]) UpdateWhere(ctx context.Context, where Predicate, updates map[
 func (c *Curd[T]) DeleteByID(ctx context.Context, id any, hard bool) error {
 	tableName := tableName[T]()
 	if hard {
-		query := fmt.Sprintf("DELETE FROM %s WHERE id = %s", tableName, c.dialect.Placeholder(1))
+		query := "DELETE FROM " + tableName + " WHERE id = " + c.dialect.Placeholder(1)
 		defer c.logSQL(ctx, query, id)()
 		_, err := c.q.Exec(ctx, query, id)
 		return err
 	}
-	query := fmt.Sprintf("UPDATE %s SET deleted_date = %s WHERE id = %s", tableName, c.dialect.Placeholder(1), c.dialect.Placeholder(2))
+	query := "UPDATE " + tableName + " SET deleted_date = " + c.dialect.Placeholder(1) + " WHERE id = " + c.dialect.Placeholder(2)
 	args := []any{time.Now().UTC(), id}
 	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
@@ -549,7 +635,7 @@ func (c *Curd[T]) DeleteWhere(ctx context.Context, where Predicate) error {
 	if whereClause != "" {
 		whereSQL = " WHERE " + whereClause
 	}
-	query := fmt.Sprintf("DELETE FROM %s%s", tableName, whereSQL)
+	query := "DELETE FROM " + tableName + whereSQL
 	defer c.logSQL(ctx, query, args...)()
 	_, err := c.q.Exec(ctx, query, args...)
 	return err
@@ -562,7 +648,7 @@ func (c *Curd[T]) DeleteWhere(ctx context.Context, where Predicate) error {
 func (c *Curd[T]) Count(ctx context.Context, where Predicate) (int64, error) {
 	tableName := tableName[T]()
 	whereClause, args := c.buildWhereClause(where)
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s%s", tableName, whereClause)
+	query := "SELECT COUNT(*) FROM " + tableName + whereClause
 	var count int64
 	defer c.logSQL(ctx, query, args...)()
 	err := c.q.QueryRow(ctx, query, args...).Scan(&count)
@@ -574,12 +660,8 @@ func (c *Curd[T]) Count(ctx context.Context, where Predicate) (int64, error) {
 func (c *Curd[T]) Exists(ctx context.Context, where Predicate) (bool, error) {
 	tableName := tableName[T]()
 	whereClause, args := c.buildWhereClause(where)
-	whereSQL := ""
-	if whereClause != "" {
-		whereSQL = whereClause
-	}
 	var exists bool
-	query := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s%s)", tableName, whereSQL)
+	query := "SELECT EXISTS(SELECT 1 FROM " + tableName + whereClause + ")"
 	defer c.logSQL(ctx, query, args...)()
 	err := c.q.QueryRow(ctx, query, args...).Scan(&exists)
 	return exists, err
@@ -632,10 +714,25 @@ func (c *Curd[T]) Upsert(ctx context.Context, where Predicate, row *T) error {
 // This is a convenience wrapper around Upsert with an id-based predicate.
 func (c *Curd[T]) Save(ctx context.Context, row *T) error {
 	v := reflect.ValueOf(row).Elem()
-
-	idField := v.FieldByName("ID")
-	if !idField.IsValid() {
-		idField = v.FieldByName("Id")
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return c.InsertOne(ctx, row)
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return c.InsertOne(ctx, row)
+	}
+	var idField reflect.Value
+	if path, ok := cachedFieldIndex(v.Type(), "ID"); ok {
+		idField = v.FieldByIndex(path)
+	} else if path, ok := cachedFieldIndex(v.Type(), "Id"); ok {
+		idField = v.FieldByIndex(path)
+	} else {
+		idField = v.FieldByName("ID")
+		if !idField.IsValid() {
+			idField = v.FieldByName("Id")
+		}
 	}
 	if !idField.IsValid() || idField.IsZero() {
 		return c.InsertOne(ctx, row)
@@ -658,7 +755,24 @@ func structToUpdates(v reflect.Value, fm FieldMapper, transforms []FieldTransfor
 	if t.Kind() != reflect.Struct {
 		return nil
 	}
-	updates := make(map[string]any)
+	// Fast path for the default mapper: reuse the cached column plan.
+	if _, ok := fm.(defaultFieldMapper); ok {
+		p := getRowPlan(t)
+		updates := make(map[string]any, len(p.cols))
+		for pos := 0; pos < len(p.cols); pos++ {
+			col := p.cols[pos]
+			if col == "id" {
+				continue
+			}
+			val := v.Field(p.idx[pos]).Interface()
+			for _, tr := range transforms {
+				val = tr(col, val)
+			}
+			updates[col] = val
+		}
+		return updates
+	}
+	updates := make(map[string]any, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		col := fm.ColumnName(f)
@@ -684,7 +798,7 @@ func structToUpdates(v reflect.Value, fm FieldMapper, transforms []FieldTransfor
 func (c *Curd[T]) Pluck(ctx context.Context, column string, where Predicate) ([]any, error) {
 	tableName := tableName[T]()
 	whereClause, args := c.buildWhereClause(where)
-	query := fmt.Sprintf("SELECT %s FROM %s%s", column, tableName, whereClause)
+	query := "SELECT " + column + " FROM " + tableName + whereClause
 	defer c.logSQL(ctx, query, args...)()
 	rows, err := c.q.Query(ctx, query, args...)
 	if err != nil {
@@ -1108,6 +1222,28 @@ func newT[T any]() reflect.Value {
 	return reflect.New(typ).Elem()
 }
 
+var timeType = reflect.TypeOf(time.Time{})
+
+func hasFieldUncached(v any, name string) bool {
+	var t reflect.Type
+	switch val := v.(type) {
+	case reflect.Type:
+		t = val
+	case reflect.Value:
+		t = val.Type()
+	default:
+		t = reflect.TypeOf(v)
+	}
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return false
+	}
+	_, ok := t.FieldByName(name)
+	return ok
+}
+
 func hasField(v any, name string) bool {
 	var t reflect.Type
 	switch val := v.(type) {
@@ -1121,9 +1257,16 @@ func hasField(v any, name string) bool {
 	for t != nil && t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-	if t.Kind() != reflect.Struct {
+	if t == nil || t.Kind() != reflect.Struct {
 		return false
 	}
+	if path, ok := cachedFieldIndex(t, name); ok {
+		_ = path
+		return true
+	}
+	// cachedFieldIndex caches negatives too, so a miss here means the
+	// type/name pair was never seen — but the cache was already populated
+	// by the call above; double-check via FieldByName for safety.
 	_, ok := t.FieldByName(name)
 	return ok
 }
@@ -1135,10 +1278,23 @@ func setField(v reflect.Value, name string, val any) {
 		}
 		v = v.Elem()
 	}
+	if v.Kind() != reflect.Struct {
+		return
+	}
+	if path, ok := cachedFieldIndex(v.Type(), name); ok {
+		f := v.FieldByIndex(path)
+		if f.CanSet() {
+			rv := reflect.ValueOf(val)
+			if rv.IsValid() && rv.Type().AssignableTo(f.Type()) {
+				f.Set(rv)
+			}
+		}
+		return
+	}
 	f := v.FieldByName(name)
 	if f.IsValid() && f.CanSet() {
 		rv := reflect.ValueOf(val)
-		if rv.Type().AssignableTo(f.Type()) {
+		if rv.IsValid() && rv.Type().AssignableTo(f.Type()) {
 			f.Set(rv)
 		}
 	}
@@ -1151,11 +1307,18 @@ func setNow(v reflect.Value, name string) {
 		}
 		v = v.Elem()
 	}
-	f := v.FieldByName(name)
-	if f.IsValid() && f.CanSet() {
-		switch f.Interface().(type) {
-		case time.Time:
+	if v.Kind() != reflect.Struct {
+		return
+	}
+	if path, ok := cachedFieldIndex(v.Type(), name); ok {
+		f := v.FieldByIndex(path)
+		if f.CanSet() && f.Type() == timeType {
 			f.Set(reflect.ValueOf(time.Now().UTC()))
 		}
+		return
+	}
+	f := v.FieldByName(name)
+	if f.IsValid() && f.CanSet() && f.Type() == timeType {
+		f.Set(reflect.ValueOf(time.Now().UTC()))
 	}
 }

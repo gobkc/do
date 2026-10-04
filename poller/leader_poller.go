@@ -2,8 +2,8 @@ package poller
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -66,7 +66,7 @@ func (lp *LeaderPoller[T]) tryRunLeaderTask(ctx context.Context, task func(T)) {
 	lp.mu.Lock()
 	defer lp.mu.Unlock()
 
-	key := fmt.Sprintf("%d", time.Now().UnixNano())
+	key := strconv.FormatInt(time.Now().UnixNano(), 10)
 	acquired, err := lp.cache.SetNX(ctx, lp.subject, key, lp.lockTTL)
 	if err != nil {
 		slog.Error(`failed to acquire leader lock`, slog.String("error", err.Error()))
