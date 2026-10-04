@@ -3,6 +3,7 @@ package do
 import (
 	"context"
 	"math/rand"
+	"strings"
 	"time"
 )
 
@@ -147,12 +148,22 @@ func isRetryable(err error) bool {
 	if msg == "" {
 		return false
 	}
-	// Single pass over msg per keyword, zero allocations.
-	// Keywords are checked longest-first so a match short-circuits early
-	// on the most distinctive token.
+	// ASCII fast path avoids strings.ToUpper's allocation. Non-ASCII
+	// messages fall back to ToUpper so Unicode simple case mappings
+	// (e.g. 'ſ' -> 'S') keep behaving exactly as before.
+	ascii := true
+	for i := 0; i < len(msg); i++ {
+		if msg[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if !ascii {
+		msg = strings.ToUpper(msg)
+	}
 	switch {
-	case containsFoldASCII(msg, "DEADLINE_EXCEEDED"),
-		containsFoldASCII(msg, "RESOURCE_EXHAUSTED"),
+	case containsFoldASCII(msg, "RESOURCE_EXHAUSTED"),
+		containsFoldASCII(msg, "DEADLINE_EXCEEDED"),
 		containsFoldASCII(msg, "UNAVAILABLE"),
 		containsFoldASCII(msg, "ABORTED"):
 		return true

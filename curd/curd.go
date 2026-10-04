@@ -16,10 +16,10 @@ import (
 // typeMetaCache caches per-entity-type metadata derived from reflection:
 // table names and soft-delete (DeletedDate) support. Keys are the
 // reflect.Type of T (deref not needed — each T maps to exactly one entry).
-var (
-	tableNameCache  sync.Map // map[reflect.Type]string
-	hasDeletedCache sync.Map // map[reflect.Type]bool
-)
+// hasDeletedCache caches whether entity types support soft-delete
+// (DeletedDate field). Unlike TableName, this is purely type-derived and
+// stable for the lifetime of the process.
+var hasDeletedCache sync.Map // map[reflect.Type]bool
 
 // globalSQLLog controls SQL logging for standalone functions (QueryRaw, ExecRaw, etc.).
 var globalSQLLog bool
@@ -192,9 +192,9 @@ func formatArg(arg any) string {
 	case uint64:
 		return strconv.FormatUint(v, 10)
 	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32)
+		return strconv.FormatFloat(float64(v), 'g', -1, 32)
 	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64)
+		return strconv.FormatFloat(v, 'g', -1, 64)
 	case []byte:
 		return "'" + strings.ReplaceAll(string(v), "'", "''") + "'"
 	default:
@@ -218,25 +218,15 @@ func formatArg(arg any) string {
 // It handles both value types (e.g. VPaymentOrder) and pointer types
 // (e.g. *VPaymentOrder). When T is a pointer, var t T would be nil and
 // calling a value-receiver TableName() on a nil pointer would panic.
-// Results are cached per T so repeated queries avoid reflection.
+// Not cached: TableName() may legitimately depend on runtime state, so it
+// is evaluated on every call exactly as before.
 func tableName[T Table]() string {
-	key := reflect.TypeOf((*T)(nil)).Elem()
-	if v, ok := tableNameCache.Load(key); ok {
-		return v.(string)
-	}
 	var zero T
 	rv := reflect.ValueOf(&zero).Elem()
-	var name string
 	if rv.Kind() == reflect.Ptr {
-		name = reflect.New(rv.Type().Elem()).Interface().(Table).TableName()
-	} else {
-		name = zero.TableName()
+		return reflect.New(rv.Type().Elem()).Interface().(Table).TableName()
 	}
-	actual, loaded := tableNameCache.LoadOrStore(key, name)
-	if loaded {
-		return actual.(string)
-	}
-	return name
+	return zero.TableName()
 }
 
 // typeHasDeletedDate reports whether entities of type T carry a DeletedDate
@@ -391,8 +381,8 @@ func (c *Curd[T]) Find(ctx context.Context, opts ...FindOption) ([]T, error) {
 }
 
 // FindPaginated returns a page of results together with the total count.
-// The count query wraps the same FROM/JOIN/WHERE in a subquery to correctly
-// handle JOINs.
+// The count query reuses the same FROM/WHERE; when JOINs are present it is
+// wrapped in a subquery to count joined rows correctly.
 func (c *Curd[T]) FindPaginated(ctx context.Context, opts ...FindOption) (*PaginatedResult[T], error) {
 	cfg := resolveFindConfig(opts)
 	// Don't allow limit/offset on the count query
@@ -468,13 +458,6 @@ func (c *Curd[T]) InsertOne(ctx context.Context, row *T) error {
 		idFieldName = "ID"
 	} else if _, ok := cachedFieldIndex(t, "Id"); ok {
 		idFieldName = "Id"
-	} else {
-		// Fallback for promoted fields not covered by the cache.
-		if hasFieldUncached(t, "ID") {
-			idFieldName = "ID"
-		} else if hasFieldUncached(t, "Id") {
-			idFieldName = "Id"
-		}
 	}
 	if idFieldName != "" {
 		returningClause = " RETURNING id"
@@ -1260,14 +1243,9 @@ func hasField(v any, name string) bool {
 	if t == nil || t.Kind() != reflect.Struct {
 		return false
 	}
-	if path, ok := cachedFieldIndex(t, name); ok {
-		_ = path
-		return true
-	}
-	// cachedFieldIndex caches negatives too, so a miss here means the
-	// type/name pair was never seen — but the cache was already populated
-	// by the call above; double-check via FieldByName for safety.
-	_, ok := t.FieldByName(name)
+	// cachedFieldIndex resolves promoted fields via FieldByName and
+	// caches negatives, so its answer is authoritative.
+	_, ok := cachedFieldIndex(t, name)
 	return ok
 }
 
@@ -1281,18 +1259,12 @@ func setField(v reflect.Value, name string, val any) {
 	if v.Kind() != reflect.Struct {
 		return
 	}
-	if path, ok := cachedFieldIndex(v.Type(), name); ok {
-		f := v.FieldByIndex(path)
-		if f.CanSet() {
-			rv := reflect.ValueOf(val)
-			if rv.IsValid() && rv.Type().AssignableTo(f.Type()) {
-				f.Set(rv)
-			}
-		}
+	path, ok := cachedFieldIndex(v.Type(), name)
+	if !ok {
 		return
 	}
-	f := v.FieldByName(name)
-	if f.IsValid() && f.CanSet() {
+	f := v.FieldByIndex(path)
+	if f.CanSet() {
 		rv := reflect.ValueOf(val)
 		if rv.IsValid() && rv.Type().AssignableTo(f.Type()) {
 			f.Set(rv)
@@ -1310,15 +1282,12 @@ func setNow(v reflect.Value, name string) {
 	if v.Kind() != reflect.Struct {
 		return
 	}
-	if path, ok := cachedFieldIndex(v.Type(), name); ok {
-		f := v.FieldByIndex(path)
-		if f.CanSet() && f.Type() == timeType {
-			f.Set(reflect.ValueOf(time.Now().UTC()))
-		}
+	path, ok := cachedFieldIndex(v.Type(), name)
+	if !ok {
 		return
 	}
-	f := v.FieldByName(name)
-	if f.IsValid() && f.CanSet() && f.Type() == timeType {
+	f := v.FieldByIndex(path)
+	if f.CanSet() && f.Type() == timeType {
 		f.Set(reflect.ValueOf(time.Now().UTC()))
 	}
 }

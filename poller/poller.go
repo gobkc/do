@@ -24,13 +24,13 @@ func NewPoller[T any](interval time.Duration) *Poller[T] {
 
 func (p *Poller[T]) Start(query func() (*T, error)) {
 	go func() {
-		timer := time.NewTimer(0)
-		defer timer.Stop()
-		// Drain the initial immediate tick.
-		select {
-		case <-timer.C:
-		default:
+		// Start with a stopped, drained timer so the first query runs
+		// immediately and every later Reset is safe on all Go versions.
+		timer := time.NewTimer(p.interval)
+		if !timer.Stop() {
+			<-timer.C
 		}
+		defer timer.Stop()
 		for {
 			select {
 			case <-p.done:

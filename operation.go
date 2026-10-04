@@ -14,27 +14,49 @@ import (
 	"time"
 )
 
-// regexpCache caches successfully compiled regular expressions.
-// Failed compilations are NOT cached so that invalid patterns keep the
-// original behavior (re-attempt compile + log on every call).
-var regexpCache sync.Map // map[string]*regexp.Regexp
+// regexpCache caches successfully compiled regular expressions. It is
+// bounded so that callers passing unbounded, data-derived patterns cannot
+// grow memory without limit. Failed compilations are NOT cached so that
+// invalid patterns keep the original behavior (re-attempt compile + log
+// on every call).
+const maxRegexpCacheEntries = 512
+
+var (
+	regexpCacheMu sync.Mutex
+	regexpCache   = make(map[string]*regexp.Regexp, maxRegexpCacheEntries)
+)
 
 func cachedRegexp(pattern string) (*regexp.Regexp, error) {
-	if v, ok := regexpCache.Load(pattern); ok {
-		if re, ok := v.(*regexp.Regexp); ok && re != nil {
-			return re, nil
-		}
+	regexpCacheMu.Lock()
+	re, ok := regexpCache[pattern]
+	regexpCacheMu.Unlock()
+	if ok {
+		return re, nil
 	}
+	// Compile outside the lock; concurrent compilation of the same new
+	// pattern is harmless (both results are valid).
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, err
 	}
-	actual, loaded := regexpCache.LoadOrStore(pattern, re)
-	if loaded {
-		if are, ok := actual.(*regexp.Regexp); ok && are != nil {
-			return are, nil
+	regexpCacheMu.Lock()
+	if len(regexpCache) >= maxRegexpCacheEntries {
+		// Evict an arbitrary quarter of the entries to bound memory.
+		evict := maxRegexpCacheEntries / 4
+		for k := range regexpCache {
+			delete(regexpCache, k)
+			evict--
+			if evict <= 0 {
+				break
+			}
 		}
 	}
+	if existing, ok := regexpCache[pattern]; ok {
+		re = existing
+	} else {
+		regexpCache[pattern] = re
+	}
+	regexpCacheMu.Unlock()
 	return re, nil
 }
 
@@ -426,9 +448,10 @@ func zeroableToString[T Zeroable](v T) string {
 	case uintptr:
 		return strconv.FormatUint(uint64(vv), 10)
 	case float32:
-		return strconv.FormatFloat(float64(vv), 'f', -1, 32)
+		// 'g' with shortest precision matches fmt's %v for floats.
+		return strconv.FormatFloat(float64(vv), 'g', -1, 32)
 	case float64:
-		return strconv.FormatFloat(vv, 'f', -1, 64)
+		return strconv.FormatFloat(vv, 'g', -1, 64)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
