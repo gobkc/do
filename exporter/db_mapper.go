@@ -48,6 +48,17 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter, mapper func(*T)
 		return err
 	}
 
+	// Per-column struct field index resolved once per query instead of a
+	// map lookup per column per row. -1 means "not mapped".
+	colFieldIdx := make([]int, len(cols))
+	for i, colName := range cols {
+		if sIdx, ok := dbColToStructIdx[colName]; ok {
+			colFieldIdx[i] = sIdx
+		} else {
+			colFieldIdx[i] = -1
+		}
+	}
+
 	// Reuse scan buffers across rows: rows.Scan overwrites them every
 	// iteration, so per-row allocation is unnecessary.
 	scanValues := make([]any, len(cols))
@@ -70,14 +81,12 @@ func StreamFromRows[T any](rows *sql.Rows, exp DocumentExporter, mapper func(*T)
 			return err
 		}
 
-		for i, colName := range cols {
-			rawVal := scanValues[i]
-			if rawVal == nil {
+		for i, sIdx := range colFieldIdx {
+			if sIdx < 0 {
 				continue
 			}
-
-			sIdx, ok := dbColToStructIdx[colName]
-			if !ok {
+			rawVal := scanValues[i]
+			if rawVal == nil {
 				continue
 			}
 			field := valElement.Field(sIdx)

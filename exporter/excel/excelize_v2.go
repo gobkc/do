@@ -3,6 +3,7 @@ package excel
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"unicode/utf8"
 
 	"github.com/xuri/excelize/v2"
@@ -129,11 +130,43 @@ func (e *StreamExport) WriteRow(values []any) error {
 
 func (e *StreamExport) writeRowWithStyle(values []any, styleID int, height float64) error {
 	for i, val := range values {
-		// Fast path: %v on a string is the string itself.
+		// Fast paths for the common scalar types: identical output to
+		// fmt.Sprintf("%v", val) without fmt's reflection overhead.
 		var strVal string
-		if s, ok := val.(string); ok {
-			strVal = s
-		} else {
+		switch v := val.(type) {
+		case string:
+			strVal = v
+		case int:
+			strVal = strconv.Itoa(v)
+		case int8:
+			strVal = strconv.FormatInt(int64(v), 10)
+		case int16:
+			strVal = strconv.FormatInt(int64(v), 10)
+		case int32:
+			strVal = strconv.FormatInt(int64(v), 10)
+		case int64:
+			strVal = strconv.FormatInt(v, 10)
+		case uint:
+			strVal = strconv.FormatUint(uint64(v), 10)
+		case uint8:
+			strVal = strconv.FormatUint(uint64(v), 10)
+		case uint16:
+			strVal = strconv.FormatUint(uint64(v), 10)
+		case uint32:
+			strVal = strconv.FormatUint(uint64(v), 10)
+		case uint64:
+			strVal = strconv.FormatUint(v, 10)
+		case float32:
+			strVal = strconv.FormatFloat(float64(v), 'g', -1, 32)
+		case float64:
+			strVal = strconv.FormatFloat(v, 'g', -1, 64)
+		case bool:
+			if v {
+				strVal = "true"
+			} else {
+				strVal = "false"
+			}
+		default:
 			strVal = fmt.Sprintf("%v", val)
 		}
 		runes := utf8.RuneCountInString(strVal)
@@ -151,7 +184,9 @@ func (e *StreamExport) writeRowWithStyle(values []any, styleID int, height float
 		}
 	}
 
-	cell, _ := excelize.CoordinatesToCellName(1, e.currentRow)
+	// Equivalent to excelize.CoordinatesToCellName(1, e.currentRow)
+	// ("A" + row) without the per-row allocation-heavy conversion.
+	cell := "A" + strconv.Itoa(e.currentRow)
 	if err := e.stream.SetRow(cell, values, excelize.RowOpts{
 		Height:  height,
 		StyleID: styleID,

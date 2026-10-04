@@ -9,7 +9,6 @@ import (
 	curd "github.com/gobkc/do/curd"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -103,16 +102,19 @@ func NewPool(dsn string, opts ...PoolOption) (*Pool, error) {
 	return &Pool{pool: pool}, nil
 }
 
+// pgx.Rows, pgx.Row and pgconn.CommandTag already satisfy the curd
+// interfaces, so they are returned directly without adapter allocations.
+
 func (p *Pool) Query(ctx context.Context, sql string, args ...any) (curd.Rows, error) {
 	rows, err := p.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
-	return &rowsAdapter{Rows: rows}, nil
+	return rows, nil
 }
 
 func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) curd.Row {
-	return &rowAdapter{Row: p.pool.QueryRow(ctx, sql, args...)}
+	return p.pool.QueryRow(ctx, sql, args...)
 }
 
 func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (curd.Result, error) {
@@ -120,7 +122,7 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (curd.Result, 
 	if err != nil {
 		return nil, err
 	}
-	return &resultAdapter{CommandTag: tag}, nil
+	return tag, nil
 }
 
 func (p *Pool) Begin(ctx context.Context) (curd.Tx, error) {
@@ -152,18 +154,6 @@ func (p *Pool) Close() {
 	p.pool.Close()
 }
 
-type rowsAdapter struct{ pgx.Rows }
-
-type rowAdapter struct{ pgx.Row }
-
-type resultAdapter struct {
-	pgconn.CommandTag
-}
-
-func (r *resultAdapter) RowsAffected() int64 {
-	return r.CommandTag.RowsAffected()
-}
-
 type txAdapter struct {
 	pgx.Tx
 }
@@ -173,11 +163,11 @@ func (t *txAdapter) Query(ctx context.Context, sql string, args ...any) (curd.Ro
 	if err != nil {
 		return nil, err
 	}
-	return &rowsAdapter{Rows: rows}, nil
+	return rows, nil
 }
 
 func (t *txAdapter) QueryRow(ctx context.Context, sql string, args ...any) curd.Row {
-	return &rowAdapter{Row: t.Tx.QueryRow(ctx, sql, args...)}
+	return t.Tx.QueryRow(ctx, sql, args...)
 }
 
 func (t *txAdapter) Exec(ctx context.Context, sql string, args ...any) (curd.Result, error) {
@@ -185,5 +175,5 @@ func (t *txAdapter) Exec(ctx context.Context, sql string, args ...any) (curd.Res
 	if err != nil {
 		return nil, err
 	}
-	return &resultAdapter{CommandTag: tag}, nil
+	return tag, nil
 }

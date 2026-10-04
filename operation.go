@@ -330,15 +330,55 @@ var replaceFuncMap = template.FuncMap{
 	"escape":  escapeFunc,
 }
 
+// templateCache caches parsed templates keyed by source text. It is
+// bounded so caller-controlled inputs cannot grow memory without limit.
+// Parsed templates are safe for concurrent execution.
+const maxTemplateCacheEntries = 128
+
+var (
+	templateCacheMu sync.Mutex
+	templateCache   = make(map[string]*template.Template, maxTemplateCacheEntries)
+)
+
+func cachedTemplate(src string) (*template.Template, error) {
+	templateCacheMu.Lock()
+	t, ok := templateCache[src]
+	templateCacheMu.Unlock()
+	if ok {
+		return t, nil
+	}
+	// Parse errors are not cached, preserving the original behavior of
+	// re-parsing and returning the same error on every call.
+	t, err := template.New("soapRequest").Funcs(replaceFuncMap).Parse(src)
+	if err != nil {
+		return nil, err
+	}
+	templateCacheMu.Lock()
+	if len(templateCache) >= maxTemplateCacheEntries {
+		evict := maxTemplateCacheEntries / 4
+		for k := range templateCache {
+			delete(templateCache, k)
+			evict--
+			if evict <= 0 {
+				break
+			}
+		}
+	}
+	if existing, ok := templateCache[src]; ok {
+		t = existing
+	} else {
+		templateCache[src] = t
+	}
+	templateCacheMu.Unlock()
+	return t, nil
+}
+
 func ReplaceMap(s string, replace map[string]string) (result string, err error) {
 	result = s
 	if replace == nil {
 		replace = make(map[string]string)
 	}
-	// Reuse the global FuncMap instead of allocating a new map per call,
-	// and reuse buffers via pool. Template parsing itself cannot be cached
-	// safely because s is caller-controlled and unbounded.
-	tmpl, err := template.New("soapRequest").Funcs(replaceFuncMap).Parse(s)
+	tmpl, err := cachedTemplate(s)
 	if err != nil {
 		return result, err
 	}

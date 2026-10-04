@@ -58,14 +58,15 @@ func (s *RedisStore) Get(ctx context.Context, key string) (owner string, ttl tim
 	return val, ttl, nil
 }
 
-func (s *RedisStore) Delete(ctx context.Context, key, owner string) error {
-	script := redis.NewScript(`
+var deleteScript = redis.NewScript(`
 if redis.call("GET", KEYS[1]) == ARGV[1] then
     return redis.call("DEL", KEYS[1])
 else
     return 0
 end
 `)
-	_, err := script.Run(ctx, s.client, []string{key}, owner).Result()
+
+func (s *RedisStore) Delete(ctx context.Context, key, owner string) error {
+	_, err := deleteScript.Run(ctx, s.client, []string{key}, owner).Result()
 	return err
 }

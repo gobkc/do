@@ -1,10 +1,125 @@
 package curd
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"sync"
 )
+
+var scannerType = reflect.TypeOf((*sql.Scanner)(nil)).Elem()
+
+// scanPlan is a per-type, precomputed description of how a struct maps to
+// scanned columns. It removes per-row type inspection (field kinds,
+// sql.Scanner checks, pointer element types) from the scan hot path.
+type scanPlan struct {
+	scalar    bool           // T is a non-struct scalar; a single *any target
+	idx       []int          // struct field indexes mapped to columns, in order
+	fieldType []reflect.Type // field types parallel to idx
+	isScanner []bool         // *fieldType implements sql.Scanner
+	isPtr     []bool         // field type is a pointer
+	ptrElem   []reflect.Type // pointer element type (nil when isPtr is false)
+}
+
+var scanPlanDefault sync.Map // map[reflect.Type]*scanPlan
+var scanPlanRaw sync.Map     // map[reflect.Type]*scanPlan
+
+// scanPlanFor returns the cached scan plan for T under the given mapper.
+// Only the built-in mappers are cacheable; custom mappers may vary per
+// instance, so callers keep the generic per-row path for them.
+func scanPlanFor[T any](fm FieldMapper) (*scanPlan, bool) {
+	var cache *sync.Map
+	switch fm.(type) {
+	case defaultFieldMapper:
+		cache = &scanPlanDefault
+	case rawFieldMapper:
+		cache = &scanPlanRaw
+	default:
+		return nil, false
+	}
+	typ := reflect.TypeFor[T]()
+	if v, ok := cache.Load(typ); ok {
+		return v.(*scanPlan), true
+	}
+	t := typ
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	p := &scanPlan{}
+	if t == nil || t.Kind() != reflect.Struct {
+		p.scalar = true
+	} else {
+		p.idx = make([]int, 0, t.NumField())
+		p.fieldType = make([]reflect.Type, 0, t.NumField())
+		p.isScanner = make([]bool, 0, t.NumField())
+		p.isPtr = make([]bool, 0, t.NumField())
+		p.ptrElem = make([]reflect.Type, 0, t.NumField())
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			if fm.ColumnName(f) == "" {
+				continue
+			}
+			ft := f.Type
+			p.idx = append(p.idx, i)
+			p.fieldType = append(p.fieldType, ft)
+			p.isScanner = append(p.isScanner, reflect.PtrTo(ft).Implements(scannerType))
+			if ft.Kind() == reflect.Ptr {
+				p.isPtr = append(p.isPtr, true)
+				p.ptrElem = append(p.ptrElem, ft.Elem())
+			} else {
+				p.isPtr = append(p.isPtr, false)
+				p.ptrElem = append(p.ptrElem, nil)
+			}
+		}
+	}
+	actual, loaded := cache.LoadOrStore(typ, p)
+	if loaded {
+		return actual.(*scanPlan), true
+	}
+	return p, true
+}
+
+// newScanBuffers allocates the reusable scan buffers for a plan.
+// database/sql overwrites every destination on Scan, so the same
+// []any value slots and their *any pointers are safe to reuse per row.
+func newScanBuffers(p *scanPlan) (values []any, ptrs []any, fields []reflect.Value) {
+	n := p.targetCount()
+	values = make([]any, n)
+	ptrs = make([]any, n)
+	for i := range ptrs {
+		ptrs[i] = &values[i]
+	}
+	fields = make([]reflect.Value, n)
+	return
+}
+
+func (p *scanPlan) targetCount() int {
+	if p.scalar {
+		return 1
+	}
+	return len(p.idx)
+}
+
+// fillScanFields fills fields with the addressable struct fields (or the
+// scalar value itself) of elem, following the plan order. It reports false
+// when elem is a nil pointer chain (no scan destinations).
+func fillScanFields(elem reflect.Value, p *scanPlan, fields []reflect.Value) bool {
+	v := elem
+	for v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	if p.scalar {
+		fields[0] = v
+		return true
+	}
+	for i, fi := range p.idx {
+		fields[i] = v.Field(fi)
+	}
+	return true
+}
 
 // fieldIndexCache caches struct field index paths by (type, field name).
 // Missing fields are stored as a nil []int (cached negative lookup).
@@ -49,6 +164,10 @@ func cachedFieldIndex(t reflect.Type, name string) ([]int, bool) {
 // columnsCache caches SELECT column lists per struct type for the default
 // mapper. The cached slices are read-only; callers must not mutate them.
 var columnsCache sync.Map // map[reflect.Type][]string
+
+// columnsJoinedCache caches the comma-joined column list for SELECT
+// statements, avoiding a strings.Join per query.
+var columnsJoinedCache sync.Map // map[reflect.Type]string
 
 // scanIndexCache caches struct field indexes that map to a column,
 // per struct type, for the default and raw mappers.
@@ -180,6 +299,30 @@ func columnsFromType(t reflect.Type, fm FieldMapper) []string {
 	return buildColumns(t, fm)
 }
 
+// columnsJoinedFromType returns the comma-separated column list for SELECT
+// statements, cached per struct type for the default mapper. For custom
+// mappers it builds the list on each call, like before.
+func columnsJoinedFromType(t reflect.Type, fm FieldMapper) string {
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return ""
+	}
+	if _, ok := fm.(defaultFieldMapper); ok {
+		if v, ok := columnsJoinedCache.Load(t); ok {
+			return v.(string)
+		}
+		s := strings.Join(buildColumns(t, fm), ",")
+		actual, loaded := columnsJoinedCache.LoadOrStore(t, s)
+		if loaded {
+			return actual.(string)
+		}
+		return s
+	}
+	return strings.Join(buildColumns(t, fm), ",")
+}
+
 func getRowPlan(t reflect.Type) *rowPlan {
 	if v, ok := rowPlanCache.Load(t); ok {
 		return v.(*rowPlan)
@@ -224,16 +367,22 @@ func rowValues(v reflect.Value, fm FieldMapper, transforms ...FieldTransformer) 
 	if _, ok := fm.(defaultFieldMapper); ok {
 		p := getRowPlan(t)
 		n := len(p.cols)
-		cols := make([]string, 0, n)
+		// Skip auto-generated ID field when its value is zero, so the
+		// database can assign a sequence value. When the ID is present the
+		// cached column slice is returned as-is (read-only by convention).
+		skipID := p.idPos >= 0 && v.Field(p.idx[p.idPos]).IsZero()
+		cols := p.cols
+		if skipID {
+			cols = make([]string, 0, n-1)
+			cols = append(cols, p.cols[:p.idPos]...)
+			cols = append(cols, p.cols[p.idPos+1:]...)
+		}
 		vals := make([]any, 0, n)
 		for pos := 0; pos < n; pos++ {
-			// Skip auto-generated ID field when its value is zero,
-			// so the database can assign a sequence value.
-			if pos == p.idPos && v.Field(p.idx[pos]).IsZero() {
+			if pos == p.idPos && skipID {
 				continue
 			}
 			name := p.cols[pos]
-			cols = append(cols, name)
 			val := v.Field(p.idx[pos]).Interface()
 			for _, tr := range transforms {
 				val = tr(name, val)

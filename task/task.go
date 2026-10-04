@@ -2,8 +2,8 @@ package task
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,7 +21,8 @@ type Task[T any] struct {
 }
 
 func NewTask[T any](dep T, cache Cache, s *Scheduler) *Task[T] {
-	id := fmt.Sprintf("runner-%d-%d", time.Now().UnixNano(), runnerSeq.Add(1))
+	// Same "runner-<nano>-<seq>" shape as the previous fmt.Sprintf version.
+	id := "runner-" + strconv.FormatInt(time.Now().UnixNano(), 10) + "-" + strconv.FormatUint(runnerSeq.Add(1), 10)
 	return &Task[T]{
 		dep:      dep,
 		cache:    cache,

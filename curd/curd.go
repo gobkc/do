@@ -270,13 +270,12 @@ func (c *Curd[T]) buildWhereClause(where Predicate) (clause string, args []any) 
 // FindAll returns all rows matching the predicate, ordered and paginated.
 // Pass nil for where to include all rows. orderBy can be empty.
 func (c *Curd[T]) FindAll(ctx context.Context, where Predicate, orderBy string, limit, offset int) ([]T, error) {
-	var t T
 	name := tableName[T]()
-	cols := columnsFromType(reflect.TypeOf(t), c.fm)
+	cols := columnsJoinedFromType(reflect.TypeFor[T](), c.fm)
 
 	whereClause, args := c.buildWhereClause(where)
 
-	query := "SELECT " + strings.Join(cols, ",") + " FROM " + name + whereClause
+	query := "SELECT " + cols + " FROM " + name + whereClause
 	if orderBy != "" {
 		query += " ORDER BY " + orderBy
 	}
@@ -333,12 +332,13 @@ func (c *Curd[T]) FindByID(ctx context.Context, id any) (T, error) {
 func (c *Curd[T]) Find(ctx context.Context, opts ...FindOption) ([]T, error) {
 	cfg := resolveFindConfig(opts)
 
-	var t T
 	name := tableName[T]()
 
-	cols := cfg.columns
-	if len(cols) == 0 {
-		cols = columnsFromType(reflect.TypeOf(t), c.fm)
+	var cols string
+	if len(cfg.columns) == 0 {
+		cols = columnsJoinedFromType(reflect.TypeFor[T](), c.fm)
+	} else {
+		cols = strings.Join(cfg.columns, ",")
 	}
 
 	var fromBuilder strings.Builder
@@ -356,7 +356,7 @@ func (c *Curd[T]) Find(ctx context.Context, opts ...FindOption) ([]T, error) {
 
 	whereClause, args := c.buildWhereClause(cfg.where)
 
-	query := "SELECT " + strings.Join(cols, ",") + " FROM " + fromClause + whereClause
+	query := "SELECT " + cols + " FROM " + fromClause + whereClause
 	if cfg.orderBy != "" {
 		query += " ORDER BY " + cfg.orderBy
 	}
@@ -1007,7 +1007,7 @@ func numericString(src reflect.Value) (string, bool) {
 		return "", false
 	}
 	// Int must be *big.Int
-	if intField.Type() != reflect.TypeOf((*big.Int)(nil)) {
+	if intField.Type() != bigIntPtrType {
 		return "", false
 	}
 	// Exp must be int32
@@ -1170,15 +1170,184 @@ func nullSafeCopy(fields []reflect.Value, targets []any) {
 	}
 }
 
+// nullSafeCopyPlan is the plan-driven equivalent of nullSafeCopy for the
+// built-in mappers. It performs the same conversions in the same order,
+// but consults precomputed field metadata instead of inspecting each
+// field type on every row.
+func nullSafeCopyPlan(fields []reflect.Value, values []any, p *scanPlan) {
+	for i, f := range fields {
+		if !f.CanSet() {
+			continue
+		}
+		raw := values[i]
+		if raw == nil {
+			f.Set(reflect.Zero(f.Type()))
+			continue
+		}
+
+		ft := p.fieldType[i]
+		// Fast paths for common driver value types. Each is equivalent to
+		// the assignable/convertible branches below for the same
+		// source/target combination, without reflection type comparisons.
+		switch v := raw.(type) {
+		case string:
+			if ft.Kind() == reflect.String {
+				f.SetString(v)
+				continue
+			}
+		case int64:
+			if k := ft.Kind(); k >= reflect.Int && k <= reflect.Int64 {
+				f.SetInt(v)
+				continue
+			}
+			if k := ft.Kind(); k >= reflect.Uint && k <= reflect.Uint64 {
+				f.SetUint(uint64(v))
+				continue
+			}
+		case float64:
+			if k := ft.Kind(); k == reflect.Float32 || k == reflect.Float64 {
+				f.SetFloat(v)
+				continue
+			}
+			if k := ft.Kind(); k >= reflect.Int && k <= reflect.Int64 {
+				f.SetInt(int64(v))
+				continue
+			}
+		case bool:
+			if ft.Kind() == reflect.Bool {
+				f.SetBool(v)
+				continue
+			}
+		case []byte:
+			if ft.Kind() == reflect.String {
+				f.SetString(string(v))
+				continue
+			}
+		}
+
+		src := reflect.ValueOf(raw)
+		if src.Type().AssignableTo(ft) {
+			f.Set(src)
+			continue
+		}
+		if src.Type().ConvertibleTo(ft) {
+			f.Set(src.Convert(ft))
+			continue
+		}
+
+		switch f.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			switch src.Kind() {
+			case reflect.Float64:
+				f.SetInt(int64(src.Float()))
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				f.SetInt(src.Int())
+			default:
+				f.Set(reflect.Zero(f.Type()))
+			}
+		case reflect.Float32, reflect.Float64:
+			switch src.Kind() {
+			case reflect.Float64:
+				f.SetFloat(src.Float())
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				f.SetFloat(float64(src.Int()))
+			default:
+				f.Set(reflect.Zero(f.Type()))
+			}
+		case reflect.String:
+			f.SetString(fmt.Sprintf("%v", raw))
+		case reflect.Bool:
+			switch src.Kind() {
+			case reflect.Bool:
+				f.SetBool(src.Bool())
+			default:
+				f.Set(reflect.Zero(f.Type()))
+			}
+		default:
+			if f.CanAddr() && p.isScanner[i] {
+				scanner := f.Addr().Interface().(sql.Scanner)
+				err := scanner.Scan(raw)
+				if err != nil {
+					if s, ok2 := numericString(src); ok2 {
+						err = scanner.Scan(s)
+					}
+					if err != nil {
+						if s, ok2 := jsonbText(src); ok2 {
+							err = scanner.Scan(s)
+						}
+					}
+				}
+				if err != nil {
+					f.Set(reflect.Zero(f.Type()))
+				}
+				continue
+			}
+			if p.isPtr[i] {
+				elemType := p.ptrElem[i]
+				if src.Type().AssignableTo(elemType) {
+					ptr := reflect.New(elemType)
+					ptr.Elem().Set(src)
+					f.Set(ptr)
+					continue
+				}
+			}
+			f.Set(reflect.Zero(f.Type()))
+		}
+	}
+}
+
 func scanAllWithMapper[T any](rows Rows, fm FieldMapper) ([]T, error) {
+	p, ok := scanPlanFor[T](fm)
+	if !ok {
+		// Custom mapper: keep the generic per-row path.
+		var results []T
+		for rows.Next() {
+			elem := newT[T]()
+			targets, fields := scanTargets(elem, fm)
+			if err := rows.Scan(targets...); err != nil {
+				return nil, fmt.Errorf("scan row: %w", err)
+			}
+			nullSafeCopy(fields, targets)
+			results = append(results, elem.Interface().(T))
+		}
+		return results, rows.Err()
+	}
 	var results []T
+	values, ptrs, fields := newScanBuffers(p)
+	// For non-pointer T the result is copied into results, so a single
+	// target element can be reused: mapped fields are rewritten every row
+	// and never-mapped fields stay at their initial zero value.
+	var fixedElem reflect.Value
+	if reflect.TypeFor[T]().Kind() != reflect.Ptr {
+		fixedElem = newT[T]()
+	}
 	for rows.Next() {
-		elem := newT[T]()
-		targets, fields := scanTargets(elem, fm)
-		if err := rows.Scan(targets...); err != nil {
+		for i := range values {
+			values[i] = nil
+		}
+		elem := fixedElem
+		if !elem.IsValid() {
+			elem = newT[T]()
+		}
+		if !fillScanFields(elem, p, fields) {
+			// Matches the original scanTargets behavior for nil pointer
+			// chains: no destinations are passed to Scan.
+			targets, flds := scanTargets(elem, fm)
+			if err := rows.Scan(targets...); err != nil {
+				return nil, fmt.Errorf("scan row: %w", err)
+			}
+			nullSafeCopy(flds, targets)
+			results = append(results, elem.Interface().(T))
+			continue
+		}
+		if err := rows.Scan(ptrs...); err != nil {
 			return nil, fmt.Errorf("scan row: %w", err)
 		}
-		nullSafeCopy(fields, targets)
+		if p.scalar {
+			nullSafeCopy(fields[:1], ptrs[:1])
+		} else {
+			nullSafeCopyPlan(fields, values, p)
+		}
 		results = append(results, elem.Interface().(T))
 	}
 	return results, rows.Err()
@@ -1186,26 +1355,56 @@ func scanAllWithMapper[T any](rows Rows, fm FieldMapper) ([]T, error) {
 
 func scanRowWithMapper[T any](row Row, fm FieldMapper) (T, error) {
 	var zero T
+	p, ok := scanPlanFor[T](fm)
+	if !ok {
+		elem := newT[T]()
+		targets, fields := scanTargets(elem, fm)
+		if err := row.Scan(targets...); err != nil {
+			return zero, fmt.Errorf("scan row: %w", err)
+		}
+		nullSafeCopy(fields, targets)
+		return elem.Interface().(T), nil
+	}
+	values, ptrs, fields := newScanBuffers(p)
 	elem := newT[T]()
-	targets, fields := scanTargets(elem, fm)
-	if err := row.Scan(targets...); err != nil {
+	if !fillScanFields(elem, p, fields) {
+		targets, flds := scanTargets(elem, fm)
+		if err := row.Scan(targets...); err != nil {
+			return zero, fmt.Errorf("scan row: %w", err)
+		}
+		nullSafeCopy(flds, targets)
+		return elem.Interface().(T), nil
+	}
+	if err := row.Scan(ptrs...); err != nil {
 		return zero, fmt.Errorf("scan row: %w", err)
 	}
-	nullSafeCopy(fields, targets)
+	if p.scalar {
+		nullSafeCopy(fields[:1], ptrs[:1])
+	} else {
+		nullSafeCopyPlan(fields, values, p)
+	}
 	return elem.Interface().(T), nil
 }
 
 // newT creates a new zero value of type T and returns it as a reflect.Value.
 func newT[T any]() reflect.Value {
-	var zero T
-	typ := reflect.TypeOf(zero)
-	if typ != nil && typ.Kind() == reflect.Ptr {
+	typ := reflect.TypeFor[T]()
+	if typ.Kind() == reflect.Interface {
+		// Interface type parameters resolved to a nil reflect.Type before;
+		// keep the same failure mode (reflect.New(nil) panics).
+		var zero T
+		return reflect.New(reflect.TypeOf(zero)).Elem()
+	}
+	if typ.Kind() == reflect.Ptr {
 		return reflect.New(typ.Elem())
 	}
 	return reflect.New(typ).Elem()
 }
 
-var timeType = reflect.TypeOf(time.Time{})
+var (
+	timeType      = reflect.TypeOf(time.Time{})
+	bigIntPtrType = reflect.TypeOf((*big.Int)(nil))
+)
 
 func hasFieldUncached(v any, name string) bool {
 	var t reflect.Type

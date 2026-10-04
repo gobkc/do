@@ -55,7 +55,7 @@ type ArgBuilder struct {
 // newArgBuilder creates an ArgBuilder for the given dialect, starting at
 // the specified placeholder index.
 func newArgBuilder(d Dialect, startIdx int) *ArgBuilder {
-	return &ArgBuilder{idx: startIdx, d: d}
+	return &ArgBuilder{idx: startIdx, d: d, args: make([]any, 0, 4)}
 }
 
 // Arg adds val as a parameter and returns its placeholder string (e.g. "$3").
@@ -69,11 +69,18 @@ func (b *ArgBuilder) Arg(val any) string {
 // Args adds multiple values as parameters and returns their comma-separated
 // placeholder strings (e.g. "$1, $2, $3").
 func (b *ArgBuilder) Args(vals ...any) string {
-	phs := make([]string, len(vals))
-	for i, v := range vals {
-		phs[i] = b.Arg(v)
+	if len(vals) == 0 {
+		return ""
 	}
-	return strings.Join(phs, ", ")
+	var sb strings.Builder
+	sb.Grow(len(vals) * 4)
+	for i, v := range vals {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(b.Arg(v))
+	}
+	return sb.String()
 }
 
 // ArgsSlice returns the collected argument values.
